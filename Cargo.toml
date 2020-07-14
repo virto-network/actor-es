@@ -7,3 +7,15 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+riker = "0.4.1"
+uuid = { version = "0.8.1", features = ["serde", "v4", "v5"] }
+serde = "1.0.114"
+log = "0.4.8"
+chrono = { version = "0.4.13", features = ["serde"] }
+bson = "1.0.0"
+futures = "0.3.5"
+futures-timer = "3.0.2"
+
+[dev-dependencies]
+riker-patterns = "0.4.1"
+tokio = { version = "0.2", features = ["full"] }
