@@ -2,7 +2,7 @@ use crate::{Aggregate, EntityId, Event};
 use chrono::prelude::*;
 use riker::actors::*;
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::RangeTo;
 
 /// An actor that handles the persistance of events of entities
 /// using "commits" to track who made a change and why.  
@@ -38,36 +38,21 @@ impl<T: Aggregate> From<Event<T>> for Commit<T> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum StoreMsg<T: Aggregate> {
-    Commit(Commit<T>),
-    Snapshot((EntityId, DateTime<Utc>)),
-    SnapshotList(Range<DateTime<Utc>>),
-    Subscribe(EntityId),
-}
-impl<T: Aggregate> From<Event<T>> for StoreMsg<T> {
-    fn from(msg: Event<T>) -> Self {
-        StoreMsg::Commit(msg.into())
-    }
-}
-impl<T: Aggregate> From<Range<DateTime<Utc>>> for StoreMsg<T> {
-    fn from(range: Range<DateTime<Utc>>) -> Self {
-        StoreMsg::SnapshotList(range)
-    }
-}
-impl<T: Aggregate> From<Commit<T>> for StoreMsg<T> {
-    fn from(msg: Commit<T>) -> Self {
-        StoreMsg::Commit(msg)
-    }
-}
-impl<T: Aggregate> From<EntityId> for StoreMsg<T> {
-    fn from(id: EntityId) -> Self {
-        StoreMsg::Subscribe(id)
-    }
-}
-impl<T: Aggregate> From<(EntityId, DateTime<Utc>)> for StoreMsg<T> {
-    fn from(snap: (EntityId, DateTime<Utc>)) -> Self {
-        StoreMsg::Snapshot(snap)
+impl<T: Aggregate> Store<T> {
+    fn make_snapshot(&self, id: EntityId, _until: DateTime<Utc>) -> T {
+        let (commit, updates) = self.entities.get(&id).unwrap();
+        let entity = match commit.event.clone() {
+            Event::Create(e) => e,
+            Event::Update(_, _) => unreachable!(),
+        };
+        updates.iter().fold(entity, |mut e, up| {
+            let update = match up.event.clone() {
+                Event::Create(_) => unreachable!(),
+                Event::Update(_, u) => u,
+            };
+            T::apply_update(&mut e, update);
+            e
+        })
     }
 }
 
@@ -106,22 +91,10 @@ impl<T: Aggregate> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
     fn receive(
         &mut self,
         _cx: &Context<Self::Msg>,
-        (id, _until): (EntityId, DateTime<Utc>),
+        (id, until): (EntityId, DateTime<Utc>),
         sender: Sender,
     ) {
-        let (commit, updates) = self.entities.get(&id).unwrap();
-        let entity = match commit.event.clone() {
-            Event::Create(e) => e,
-            Event::Update(_, _) => unreachable!(),
-        };
-        let snapshot = updates.iter().fold(entity, |mut e, up| {
-            let update = match up.event.clone() {
-                Event::Create(_) => unreachable!(),
-                Event::Update(_, u) => u,
-            };
-            T::apply_update(&mut e, update);
-            e
-        });
+        let snapshot = self.make_snapshot(id, until);
         debug!("loaded snapshot for {}", id);
         sender
             .unwrap()
@@ -130,10 +103,25 @@ impl<T: Aggregate> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
     }
 }
 
-impl<T: Aggregate> Receive<Range<DateTime<Utc>>> for Store<T> {
+impl<T: Aggregate> Receive<RangeTo<DateTime<Utc>>> for Store<T> {
     type Msg = StoreMsg<T>;
-    fn receive(&mut self, ctx: &Context<Self::Msg>, msg: Range<DateTime<Utc>>, sender: Sender) {
-        todo!()
+    fn receive(
+        &mut self,
+        _ctx: &Context<Self::Msg>,
+        range: RangeTo<DateTime<Utc>>,
+        sender: Sender,
+    ) {
+        let snaps = self
+            .entities
+            .keys()
+            .map(|id| self.make_snapshot(*id, range.end))
+            .collect::<Vec<_>>();
+        trace!("{:?}", snaps);
+        debug!("loaded list of snapshots until {}", range.end);
+        sender
+            .unwrap()
+            .try_tell(snaps, None)
+            .expect("can receive snapshot list");
     }
 }
 
@@ -144,18 +132,59 @@ impl<T: Aggregate> Receive<EntityId> for Store<T> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum StoreMsg<T: Aggregate> {
+    Commit(Commit<T>),
+    Snapshot((EntityId, DateTime<Utc>)),
+    SnapshotList(RangeTo<DateTime<Utc>>),
+    Subscribe(EntityId),
+}
+impl<T: Aggregate> From<Event<T>> for StoreMsg<T> {
+    fn from(msg: Event<T>) -> Self {
+        StoreMsg::Commit(msg.into())
+    }
+}
+impl<T: Aggregate> From<RangeTo<DateTime<Utc>>> for StoreMsg<T> {
+    fn from(range: RangeTo<DateTime<Utc>>) -> Self {
+        StoreMsg::SnapshotList(range)
+    }
+}
+impl<T: Aggregate> From<Commit<T>> for StoreMsg<T> {
+    fn from(msg: Commit<T>) -> Self {
+        StoreMsg::Commit(msg)
+    }
+}
+impl<T: Aggregate> From<EntityId> for StoreMsg<T> {
+    fn from(id: EntityId) -> Self {
+        StoreMsg::Subscribe(id)
+    }
+}
+impl<T: Aggregate> From<(EntityId, DateTime<Utc>)> for StoreMsg<T> {
+    fn from(snap: (EntityId, DateTime<Utc>)) -> Self {
+        StoreMsg::Snapshot(snap)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use riker_patterns::ask::ask;
 
     #[derive(Default, Clone, Debug)]
-    pub(crate) struct TestCount {
+    pub struct TestCount {
         id: EntityId,
         pub count: i16,
     }
+    impl TestCount {
+        pub fn new(c: i16) -> Self {
+            Self {
+                count: c,
+                ..Default::default()
+            }
+        }
+    }
     #[derive(Clone, Debug)]
-    pub(crate) enum Op {
+    pub enum Op {
         Add(i16),
         Sub(i16),
     }
@@ -200,7 +229,6 @@ pub(crate) mod tests {
         let sys = ActorSystem::new().unwrap();
         let store = sys.actor_of::<Store<TestCount>>("test-counts").unwrap();
 
-        let before = Utc::now();
         let some_counter = TestCount {
             id: "123".into(),
             count: 42,
@@ -210,8 +238,9 @@ pub(crate) mod tests {
         store.tell(Event::Create(TestCount::default()), None);
         store.tell(Event::Update("123".into(), Op::Add(8)), None);
 
-        let result: Vec<TestCount> = ask(&sys, &store, before..Utc::now()).await;
+        let result: Vec<TestCount> = ask(&sys, &store, ..Utc::now()).await;
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].count, 50);
+        let some_counter_snapshot = result.iter().find(|s| s.id() == "123".into()).unwrap();
+        assert_eq!(some_counter_snapshot.count, 50);
     }
 }

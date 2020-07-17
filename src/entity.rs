@@ -1,6 +1,7 @@
 use crate::{EntityId, Store, StoreMsg};
 use async_trait::async_trait;
 use chrono::prelude::*;
+use futures::executor::block_on;
 use riker::actors::*;
 use std::marker::PhantomData;
 
@@ -13,12 +14,14 @@ pub trait Aggregate: Actor + Message + Default {
 }
 
 type StoreRef<A> = ActorRef<StoreMsg<A>>;
+pub trait Sys: TmpActorRefFactory + Run + Send + Sync {}
+impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 
 /// Implement this trait to allow your entity handle external commands
 #[async_trait]
 pub trait Command: Message {
     type Agg: Aggregate;
-    async fn handle(self, cx: &Context<CQRS<Self>>, store: &StoreRef<Self::Agg>);
+    async fn handle<Ctx: Sys>(self, cx: Ctx, store: StoreRef<Self::Agg>);
 }
 
 /// For entities that don't require handling commands
@@ -27,21 +30,18 @@ pub struct NoCmd<A: Aggregate>(PhantomData<A>);
 #[async_trait]
 impl<A: Aggregate> Command for NoCmd<A> {
     type Agg = A;
-    async fn handle(self, _: &Context<CQRS<Self>>, _: &StoreRef<Self::Agg>) {}
+
+    async fn handle<Ctx: Sys>(self, _cx: Ctx, _store: StoreRef<Self::Agg>) {}
 }
 
 /// Entities
-struct Entity<C: Command> {
+pub struct Entity<C: Command> {
     store: Option<StoreRef<C::Agg>>,
-    //_cmd: PhantomData<C>,
 }
 
 impl<C: Command> Default for Entity<C> {
     fn default() -> Self {
-        Entity {
-            store: None,
-            //_cmd: PhantomData,
-        }
+        Entity { store: None }
     }
 }
 
@@ -55,11 +55,16 @@ impl<C: Command> Actor for Entity<C> {
     fn recv(&mut self, ctx: &Context<Self::Msg>, msg: Self::Msg, sender: Sender) {
         match msg {
             CQRS::Query(q) => self.receive(ctx, q, sender),
-            CQRS::Cmd(c) => {
-                ctx.run(async move {
-                    c.handle(ctx, self.store.as_ref().unwrap()).await;
-                })
-                .unwrap();
+            CQRS::Cmd(cmd) => {
+                let sys = ctx.system.clone();
+                let store = self.store.as_ref().unwrap().clone();
+                // TODO hot to run?
+                let _ = ctx
+                    .run(async move {
+                        println!("processing command {:?}", cmd.clone());
+                        cmd.handle(sys, store).await;
+                    })
+                    .unwrap();
             }
         };
     }
@@ -69,12 +74,8 @@ impl<C: Command> Receive<Query> for Entity<C> {
     type Msg = CQRS<C>;
     fn receive(&mut self, _ctx: &Context<Self::Msg>, q: Query, sender: Sender) {
         match q {
-            Query::One(id) => self.store.as_ref().unwrap().tell(id, sender),
-            Query::All => self
-                .store
-                .as_ref()
-                .unwrap()
-                .tell(Utc.timestamp(0, 0)..Utc::now(), sender),
+            Query::One(id) => self.store.as_ref().unwrap().tell((id, Utc::now()), sender),
+            Query::All => self.store.as_ref().unwrap().tell(..Utc::now(), sender),
         }
     }
 }
@@ -117,25 +118,14 @@ mod tests {
     #[async_trait]
     impl Command for TestCmd {
         type Agg = TestCount;
-        async fn handle(self, cx: &Context<CQRS<Self>>, store: &StoreRef<Self::Agg>) {
+
+        async fn handle<Ctx: Sys>(self, cx: Ctx, store: StoreRef<Self::Agg>) {
             match self {
-                TestCmd::Create42 => store.tell(
-                    Event::Create(TestCount {
-                        count: 42,
-                        ..Default::default()
-                    }),
-                    None,
-                ),
-                TestCmd::Create99 => store.tell(
-                    Event::Create(TestCount {
-                        count: 99,
-                        ..Default::default()
-                    }),
-                    None,
-                ),
+                TestCmd::Create42 => store.tell(Event::Create(TestCount::new(42)), None),
+                TestCmd::Create99 => store.tell(Event::Create(TestCount::new(99)), None),
                 TestCmd::Double(id) => {
-                    let TestCount { count, id } = ask(&cx.system, &store, id).await;
-                    store.tell(Event::Update(id, Op::Add(count)), None)
+                    let res: TestCount = ask(&cx, &store, (id, Utc::now())).await;
+                    store.tell(Event::Update(res.id(), Op::Add(res.count)), None)
                 }
             }
         }
@@ -149,7 +139,9 @@ mod tests {
         entity.tell(TestCmd::Create42, None);
         entity.tell(TestCmd::Create99, None);
 
+        std::thread::sleep(std::time::Duration::from_secs(1));
         let counts: Vec<TestCount> = ask(&sys, &entity, Query::All).await;
+        println!("{:?}", counts);
         assert_eq!(counts[0].count, 42);
         assert_eq!(counts[1].count, 99);
 
