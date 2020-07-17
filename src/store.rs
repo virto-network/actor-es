@@ -2,6 +2,7 @@ use crate::{Aggregate, EntityId, Event};
 use chrono::prelude::*;
 use riker::actors::*;
 use std::collections::HashMap;
+use std::ops::RangeTo;
 
 /// An actor that handles the persistance of events of entities
 /// using "commits" to track who made a change and why.  
@@ -37,30 +38,21 @@ impl<T: Aggregate> From<Event<T>> for Commit<T> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum StoreMsg<T: Aggregate> {
-    Commit(Commit<T>),
-    Snapshot((EntityId, DateTime<Utc>)),
-    Subscribe(EntityId),
-}
-impl<T: Aggregate> From<Event<T>> for StoreMsg<T> {
-    fn from(msg: Event<T>) -> Self {
-        StoreMsg::Commit(msg.into())
-    }
-}
-impl<T: Aggregate> From<Commit<T>> for StoreMsg<T> {
-    fn from(msg: Commit<T>) -> Self {
-        StoreMsg::Commit(msg)
-    }
-}
-impl<T: Aggregate> From<EntityId> for StoreMsg<T> {
-    fn from(id: EntityId) -> Self {
-        StoreMsg::Subscribe(id)
-    }
-}
-impl<T: Aggregate> From<(EntityId, DateTime<Utc>)> for StoreMsg<T> {
-    fn from(snap: (EntityId, DateTime<Utc>)) -> Self {
-        StoreMsg::Snapshot(snap)
+impl<T: Aggregate> Store<T> {
+    fn make_snapshot(&self, id: EntityId, _until: DateTime<Utc>) -> T {
+        let (commit, updates) = self.entities.get(&id).unwrap();
+        let entity = match commit.event.clone() {
+            Event::Create(e) => e,
+            Event::Update(_, _) => unreachable!(),
+        };
+        updates.iter().fold(entity, |mut e, up| {
+            let update = match up.event.clone() {
+                Event::Create(_) => unreachable!(),
+                Event::Update(_, u) => u,
+            };
+            T::apply_update(&mut e, update);
+            e
+        })
     }
 }
 
@@ -71,6 +63,7 @@ impl<T: Aggregate> Actor for Store<T> {
             StoreMsg::Commit(msg) => self.receive(cx, msg, sender),
             StoreMsg::Subscribe(msg) => self.receive(cx, msg, sender),
             StoreMsg::Snapshot(msg) => self.receive(cx, msg, sender),
+            StoreMsg::SnapshotList(msg) => self.receive(cx, msg, sender),
         };
     }
 }
@@ -98,27 +91,37 @@ impl<T: Aggregate> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
     fn receive(
         &mut self,
         _cx: &Context<Self::Msg>,
-        (id, _until): (EntityId, DateTime<Utc>),
+        (id, until): (EntityId, DateTime<Utc>),
         sender: Sender,
     ) {
-        let (commit, updates) = self.entities.get(&id).unwrap();
-        let entity = match commit.event.clone() {
-            Event::Create(e) => e,
-            Event::Update(_, _) => unreachable!(),
-        };
-        let snapshot = updates.iter().fold(entity, |mut e, up| {
-            let update = match up.event.clone() {
-                Event::Create(_) => unreachable!(),
-                Event::Update(_, u) => u,
-            };
-            T::apply_update(&mut e, update);
-            e
-        });
+        let snapshot = self.make_snapshot(id, until);
         debug!("loaded snapshot for {}", id);
         sender
             .unwrap()
             .try_tell(snapshot, None)
             .expect("can receive snapshot");
+    }
+}
+
+impl<T: Aggregate> Receive<RangeTo<DateTime<Utc>>> for Store<T> {
+    type Msg = StoreMsg<T>;
+    fn receive(
+        &mut self,
+        _ctx: &Context<Self::Msg>,
+        range: RangeTo<DateTime<Utc>>,
+        sender: Sender,
+    ) {
+        let snaps = self
+            .entities
+            .keys()
+            .map(|id| self.make_snapshot(*id, range.end))
+            .collect::<Vec<_>>();
+        trace!("{:?}", snaps);
+        debug!("loaded list of snapshots until {}", range.end);
+        sender
+            .unwrap()
+            .try_tell(snaps, None)
+            .expect("can receive snapshot list");
     }
 }
 
@@ -129,24 +132,67 @@ impl<T: Aggregate> Receive<EntityId> for Store<T> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum StoreMsg<T: Aggregate> {
+    Commit(Commit<T>),
+    Snapshot((EntityId, DateTime<Utc>)),
+    SnapshotList(RangeTo<DateTime<Utc>>),
+    Subscribe(EntityId),
+}
+impl<T: Aggregate> From<Event<T>> for StoreMsg<T> {
+    fn from(msg: Event<T>) -> Self {
+        StoreMsg::Commit(msg.into())
+    }
+}
+impl<T: Aggregate> From<RangeTo<DateTime<Utc>>> for StoreMsg<T> {
+    fn from(range: RangeTo<DateTime<Utc>>) -> Self {
+        StoreMsg::SnapshotList(range)
+    }
+}
+impl<T: Aggregate> From<Commit<T>> for StoreMsg<T> {
+    fn from(msg: Commit<T>) -> Self {
+        StoreMsg::Commit(msg)
+    }
+}
+impl<T: Aggregate> From<EntityId> for StoreMsg<T> {
+    fn from(id: EntityId) -> Self {
+        StoreMsg::Subscribe(id)
+    }
+}
+impl<T: Aggregate> From<(EntityId, DateTime<Utc>)> for StoreMsg<T> {
+    fn from(snap: (EntityId, DateTime<Utc>)) -> Self {
+        StoreMsg::Snapshot(snap)
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use futures::executor::block_on;
     use riker_patterns::ask::ask;
 
     #[derive(Default, Clone, Debug)]
-    pub(crate) struct TestCount {
-        count: i16,
+    pub struct TestCount {
+        id: EntityId,
+        pub count: i16,
+    }
+    impl TestCount {
+        pub fn new(c: i16) -> Self {
+            Self {
+                count: c,
+                ..Default::default()
+            }
+        }
     }
     #[derive(Clone, Debug)]
-    pub(crate) enum Op {
+    pub enum Op {
         Add(i16),
         Sub(i16),
     }
     impl Aggregate for TestCount {
         type Update = Op;
         fn id(&self) -> EntityId {
-            "123".into()
+            self.id
         }
         fn apply_update(&mut self, update: Self::Update) {
             match update {
@@ -162,8 +208,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn load_snapshot() {
+    #[test]
+    fn load_snapshot() {
         let sys = ActorSystem::new().unwrap();
         let store = sys.actor_of::<Store<TestCount>>("test-counts").unwrap();
 
@@ -175,7 +221,27 @@ mod tests {
         store.tell(Event::Update(id, Op::Sub(9)), None);
         store.tell(Event::Update(id, Op::Add(31)), None);
 
-        let result: TestCount = ask(&sys, &store, (id, Utc::now())).await;
+        let result: TestCount = block_on(ask(&sys, &store, (id, Utc::now())));
         assert_eq!(result.count, 42);
+    }
+
+    #[test]
+    fn load_list_of_snapshots() {
+        let sys = ActorSystem::new().unwrap();
+        let store = sys.actor_of::<Store<TestCount>>("test-counts").unwrap();
+
+        let some_counter = TestCount {
+            id: "123".into(),
+            count: 42,
+        };
+        store.tell(Event::Create(some_counter), None);
+        store.tell(Event::Create(TestCount::default()), None);
+        store.tell(Event::Create(TestCount::default()), None);
+        store.tell(Event::Update("123".into(), Op::Add(8)), None);
+
+        let result: Vec<TestCount> = block_on(ask(&sys, &store, ..Utc::now()));
+        assert_eq!(result.len(), 3);
+        let some_counter_snapshot = result.iter().find(|s| s.id() == "123".into()).unwrap();
+        assert_eq!(some_counter_snapshot.count, 50);
     }
 }
