@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-pub use entity::Aggregate;
+pub use entity::{Aggregate, Command, Entity, Query, CQRS};
 use riker::actors::ChannelRef;
 pub use riker_patterns::ask::ask;
 use std::fmt;
