@@ -221,12 +221,6 @@ pub(crate) mod tests {
             };
         }
     }
-    impl Actor for TestCount {
-        type Msg = Op;
-        fn recv(&mut self, _cx: &Context<Self::Msg>, msg: Self::Msg, _sender: Sender) {
-            self.apply_update(msg);
-        }
-    }
 
     #[test]
     fn load_snapshot() {

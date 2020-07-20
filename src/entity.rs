@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 /// An Aggregate is the projected data of a series of events of an entity,
 /// given an initial state update events are applied to it until it reaches the desired state.
-pub trait Aggregate: Actor + Message + Default {
+pub trait Aggregate: Message + Default {
     type Update: Message;
     fn id(&self) -> EntityId;
     fn apply_update(&mut self, update: Self::Update);
