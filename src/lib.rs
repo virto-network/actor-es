@@ -2,10 +2,13 @@
 extern crate log;
 
 pub use entity::Aggregate;
+use riker::actors::ChannelRef;
 pub use riker_patterns::ask::ask;
 use std::fmt;
 pub use store::{Commit, Store, StoreMsg};
 use uuid::Uuid;
+
+pub type EventBus<T> = ChannelRef<Event<T>>;
 
 mod entity;
 mod store;

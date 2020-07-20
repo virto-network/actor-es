@@ -1,4 +1,4 @@
-use crate::{Aggregate, EntityId, Event};
+use crate::{Aggregate, EntityId, Event, EventBus};
 use chrono::prelude::*;
 use riker::actors::*;
 use std::collections::HashMap;
@@ -9,6 +9,7 @@ use std::ops::RangeTo;
 #[derive(Default, Debug)]
 pub struct Store<T: Aggregate> {
     entities: HashMap<EntityId, (Commit<T>, Vec<Commit<T>>)>,
+    bus: Option<EventBus<T>>,
 }
 
 type Author = Option<String>;
@@ -68,19 +69,38 @@ impl<T: Aggregate> Actor for Store<T> {
     }
 }
 
+impl<T: Aggregate> ActorFactoryArgs<EventBus<T>> for Store<T> {
+    fn create_args(bus: EventBus<T>) -> Self {
+        Store {
+            bus: Some(bus),
+            ..Default::default()
+        }
+    }
+}
+
 impl<T: Aggregate> Receive<Commit<T>> for Store<T> {
     type Msg = StoreMsg<T>;
-    fn receive(&mut self, _cx: &Context<Self::Msg>, c: Commit<T>, _sender: Sender) {
+    fn receive(&mut self, cx: &Context<Self::Msg>, c: Commit<T>, _sender: Sender) {
         trace!("storing {:?}", c);
         let id = c.event.entity_id();
+        let commit = c.clone();
         match c.event {
             Event::Create(_) => {
-                self.entities.insert(id, (c, vec![]));
+                self.entities.insert(id, (commit, vec![]));
             }
             Event::Update(_, _) => {
                 let (_, updates) = self.entities.get_mut(&id).expect("entity exists");
-                updates.push(c);
+                updates.push(commit);
             }
+        }
+        if self.bus.is_some() {
+            self.bus.as_ref().unwrap().tell(
+                Publish {
+                    topic: cx.myself.name().into(),
+                    msg: c.event,
+                },
+                None,
+            );
         }
         debug!("saved commit for {}", id);
     }
@@ -243,5 +263,59 @@ pub(crate) mod tests {
         assert_eq!(result.len(), 3);
         let some_counter_snapshot = result.iter().find(|s| s.id() == "123".into()).unwrap();
         assert_eq!(some_counter_snapshot.count, 50);
+    }
+
+    #[test]
+    fn broadcast_event() {
+        let sys = ActorSystem::new().unwrap();
+        let bus: EventBus<_> = channel("bus", &sys).unwrap();
+        let store_name = "test-counts";
+        let store = sys
+            .actor_of_args::<Store<TestCount>, _>(store_name, bus.clone())
+            .unwrap();
+
+        #[derive(Clone, Debug)]
+        pub struct Get;
+        #[derive(Clone, Debug)]
+        enum TestSubMsg {
+            Event(Event<TestCount>),
+            Get,
+        }
+        impl From<Event<TestCount>> for TestSubMsg {
+            fn from(event: Event<TestCount>) -> Self {
+                TestSubMsg::Event(event)
+            }
+        }
+
+        #[derive(Default)]
+        struct TestSub(Option<Event<TestCount>>);
+        impl Actor for TestSub {
+            type Msg = TestSubMsg;
+            fn recv(&mut self, _cx: &Context<Self::Msg>, msg: Self::Msg, sender: Sender) {
+                match msg {
+                    TestSubMsg::Get => {
+                        sender.unwrap().try_tell(self.0.clone(), None).unwrap();
+                    }
+                    TestSubMsg::Event(e) => {
+                        self.0 = Some(e);
+                    }
+                }
+            }
+        }
+
+        let sub = sys.actor_of::<TestSub>("subscriber").unwrap();
+        bus.tell(
+            Subscribe {
+                topic: store_name.into(),
+                actor: Box::new(sub.clone()),
+            },
+            None,
+        );
+
+        store.tell(Event::Create(TestCount::default()), None);
+
+        let result: Option<Event<TestCount>> = block_on(ask(&sys, &sub, TestSubMsg::Get));
+
+        assert!(result.is_some());
     }
 }
