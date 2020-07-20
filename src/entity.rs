@@ -1,8 +1,10 @@
 use crate::{EntityId, Store, StoreMsg};
 use async_trait::async_trait;
 use chrono::prelude::*;
+use futures::lock::Mutex;
 use riker::actors::*;
-use std::marker::PhantomData;
+use std::fmt;
+use std::sync::Arc;
 
 /// An Aggregate is the projected data of a series of events of an entity,
 /// given an initial state update events are applied to it until it reaches the desired state.
@@ -18,37 +20,42 @@ impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 
 /// Implement this trait to allow your entity handle external commands
 #[async_trait]
-pub trait Command: Message {
+pub trait ES: Default + fmt::Debug + Send + Sync + 'static {
     type Agg: Aggregate;
-    async fn handle<Ctx: Sys>(self, cx: Ctx, store: StoreRef<Self::Agg>);
-}
+    type Cmd: Message;
+    type Event: Message;
 
-/// For entities that don't require handling commands
-#[derive(Clone, Debug)]
-pub struct NoCmd<A: Aggregate>(PhantomData<A>);
-#[async_trait]
-impl<A: Aggregate> Command for NoCmd<A> {
-    type Agg = A;
+    async fn handle_command<Ctx: Sys>(&self, cmd: Self::Cmd, ctx: Ctx, store: StoreRef<Self::Agg>);
 
-    async fn handle<Ctx: Sys>(self, _cx: Ctx, _store: StoreRef<Self::Agg>) {}
-}
-
-/// Entity is an actor that dispatches commands and manages aggregates that are being queried
-pub struct Entity<C: Command> {
-    store: Option<StoreRef<C::Agg>>,
-}
-
-impl<C: Command> Default for Entity<C> {
-    fn default() -> Self {
-        Entity { store: None }
+    async fn handle_event<Ctx: Sys>(
+        &self,
+        _event: Self::Event,
+        _ctx: Ctx,
+        _store: StoreRef<Self::Agg>,
+    ) {
     }
 }
 
-impl<C: Command> Actor for Entity<C> {
-    type Msg = CQRS<C>;
+/// Entity is an actor that dispatches commands and manages aggregates that are being queried
+pub struct Entity<E: ES> {
+    store: Option<StoreRef<E::Agg>>,
+    es: Arc<Mutex<E>>,
+}
+
+impl<E: ES> Default for Entity<E> {
+    fn default() -> Self {
+        Entity {
+            store: None,
+            es: Arc::new(Mutex::new(E::default())),
+        }
+    }
+}
+
+impl<E: ES> Actor for Entity<E> {
+    type Msg = CQRS<E::Cmd, E::Event>;
 
     fn pre_start(&mut self, ctx: &Context<Self::Msg>) {
-        self.store = Some(ctx.actor_of::<Store<C::Agg>>(ctx.myself().name()).unwrap());
+        self.store = Some(ctx.actor_of::<Store<E::Agg>>(ctx.myself().name()).unwrap());
     }
 
     fn recv(&mut self, ctx: &Context<Self::Msg>, msg: Self::Msg, sender: Sender) {
@@ -57,17 +64,27 @@ impl<C: Command> Actor for Entity<C> {
             CQRS::Cmd(cmd) => {
                 let sys = ctx.system.clone();
                 let store = self.store.as_ref().unwrap().clone();
+                let es = self.es.clone();
                 ctx.system.exec.spawn_ok(async move {
                     debug!("processing command {:?}", cmd.clone());
-                    cmd.handle(sys, store).await;
+                    es.lock().await.handle_command(cmd, sys, store).await;
+                });
+            }
+            CQRS::Event(event) => {
+                let sys = ctx.system.clone();
+                let store = self.store.as_ref().unwrap().clone();
+                let es = self.es.clone();
+                ctx.system.exec.spawn_ok(async move {
+                    debug!("processing event {:?}", event.clone());
+                    es.lock().await.handle_event(event, sys, store).await;
                 });
             }
         };
     }
 }
 
-impl<C: Command> Receive<Query> for Entity<C> {
-    type Msg = CQRS<C>;
+impl<E: ES> Receive<Query> for Entity<E> {
+    type Msg = CQRS<E::Cmd, E::Event>;
     fn receive(&mut self, _ctx: &Context<Self::Msg>, q: Query, sender: Sender) {
         match q {
             Query::One(id) => self.store.as_ref().unwrap().tell((id, Utc::now()), sender),
@@ -77,18 +94,14 @@ impl<C: Command> Receive<Query> for Entity<C> {
 }
 
 #[derive(Clone, Debug)]
-pub enum CQRS<C> {
-    Query(Query),
+pub enum CQRS<C, E> {
     Cmd(C),
+    Event(E),
+    Query(Query),
 }
-impl<C: Command> From<Query> for CQRS<C> {
+impl<C, E> From<Query> for CQRS<C, E> {
     fn from(q: Query) -> Self {
         CQRS::Query(q)
-    }
-}
-impl<C: Command> From<C> for CQRS<C> {
-    fn from(c: C) -> Self {
-        CQRS::Cmd(c)
     }
 }
 
@@ -107,18 +120,21 @@ mod tests {
     use riker_patterns::ask::ask;
     use std::time::Duration;
 
-    #[derive(Clone, Debug)]
-    enum TestCmd {
-        Create42,
-        Create99,
-        Double(EntityId),
-    }
+    #[derive(Default, Debug)]
+    struct Test;
     #[async_trait]
-    impl Command for TestCmd {
+    impl ES for Test {
         type Agg = TestCount;
+        type Cmd = TestCmd;
+        type Event = ();
 
-        async fn handle<Ctx: Sys>(self, cx: Ctx, store: StoreRef<Self::Agg>) {
-            match self {
+        async fn handle_command<Ctx: Sys>(
+            &self,
+            cmd: Self::Cmd,
+            cx: Ctx,
+            store: StoreRef<Self::Agg>,
+        ) {
+            match cmd {
                 TestCmd::Create42 => store.tell(Event::Create(TestCount::new(42)), None),
                 TestCmd::Create99 => store.tell(Event::Create(TestCount::new(99)), None),
                 TestCmd::Double(id) => {
@@ -128,14 +144,20 @@ mod tests {
             }
         }
     }
+    #[derive(Clone, Debug)]
+    enum TestCmd {
+        Create42,
+        Create99,
+        Double(EntityId),
+    }
 
     #[test]
     fn command_n_query() {
         let sys = ActorSystem::new().unwrap();
-        let entity = sys.actor_of::<Entity<TestCmd>>("counts").unwrap();
+        let entity = sys.actor_of::<Entity<Test>>("counts").unwrap();
 
-        entity.tell(TestCmd::Create42, None);
-        entity.tell(TestCmd::Create99, None);
+        entity.tell(CQRS::Cmd(TestCmd::Create42), None);
+        entity.tell(CQRS::Cmd(TestCmd::Create99), None);
 
         std::thread::sleep(Duration::from_millis(20));
         let counts: Vec<TestCount> = block_on(ask(&sys, &entity, Query::All));
@@ -147,7 +169,7 @@ mod tests {
         assert!(count99.is_some());
 
         let id = count42.unwrap().id();
-        entity.tell(TestCmd::Double(id), None);
+        entity.tell(CQRS::Cmd(TestCmd::Double(id)), None);
         std::thread::sleep(Duration::from_millis(20));
         let result: TestCount = block_on(ask(&sys, &entity, Query::One(id)));
         assert_eq!(result.count, 84);
