@@ -1,8 +1,10 @@
 [package]
 name = "riker-es"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Daniel Olano <daniel@olanod.com>"]
 edition = "2018"
+description = "An event sourcing + CQRS abstraction on top of Riker"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 async-trait = "0.1.36"
