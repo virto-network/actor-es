@@ -33,7 +33,7 @@ impl<A: Aggregate> Command for NoCmd<A> {
     async fn handle<Ctx: Sys>(self, _cx: Ctx, _store: StoreRef<Self::Agg>) {}
 }
 
-/// Entities
+/// Entity is an actor that dispatches commands and manages aggregates that are being queried
 pub struct Entity<C: Command> {
     store: Option<StoreRef<C::Agg>>,
 }

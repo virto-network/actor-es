@@ -1,11 +1,11 @@
 #[macro_use]
 extern crate log;
 
-use std::fmt;
-use uuid::Uuid;
-
 pub use entity::Aggregate;
+pub use riker_patterns::ask::ask;
+use std::fmt;
 pub use store::{Commit, Store, StoreMsg};
+use uuid::Uuid;
 
 mod entity;
 mod store;
