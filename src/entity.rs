@@ -12,7 +12,7 @@ pub trait Aggregate: Message + Default {
     fn apply_update(&mut self, update: Self::Update);
 }
 
-type StoreRef<A> = ActorRef<StoreMsg<A>>;
+pub type StoreRef<A> = ActorRef<StoreMsg<A>>;
 pub trait Sys: TmpActorRefFactory + Run + Send + Sync {}
 impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 
