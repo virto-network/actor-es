@@ -20,10 +20,13 @@ impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 
 /// Implement this trait to allow your entity handle external commands
 #[async_trait]
-pub trait ES: Default + fmt::Debug + Send + Sync + 'static {
+pub trait ES: fmt::Debug + Send + Sync + 'static {
+    type Args: ActorArgs;
     type Agg: Aggregate;
     type Cmd: Message;
     type Event: Message;
+
+    fn new(args: Self::Args) -> Self;
 
     async fn handle_command<Ctx: Sys>(&self, cmd: Self::Cmd, ctx: Ctx, store: StoreRef<Self::Agg>);
 
@@ -42,11 +45,15 @@ pub struct Entity<E: ES> {
     es: Arc<Mutex<E>>,
 }
 
-impl<E: ES> Default for Entity<E> {
-    fn default() -> Self {
+impl<E, Args> ActorFactoryArgs<Args> for Entity<E>
+where
+    Args: ActorArgs,
+    E: ES<Args = Args>,
+{
+    fn create_args(args: Args) -> Self {
         Entity {
             store: None,
-            es: Arc::new(Mutex::new(E::default())),
+            es: Arc::new(Mutex::new(E::new(args))),
         }
     }
 }
@@ -121,12 +128,17 @@ mod tests {
     use std::time::Duration;
 
     #[derive(Default, Debug)]
-    struct Test;
+    struct Test(String);
     #[async_trait]
     impl ES for Test {
+        type Args = (u8, String);
         type Agg = TestCount;
         type Cmd = TestCmd;
         type Event = ();
+
+        fn new((num, txt): Self::Args) -> Self {
+            Test(format!("{}{}", num, txt))
+        }
 
         async fn handle_command<Ctx: Sys>(
             &self,
@@ -154,7 +166,9 @@ mod tests {
     #[test]
     fn command_n_query() {
         let sys = ActorSystem::new().unwrap();
-        let entity = sys.actor_of::<Entity<Test>>("counts").unwrap();
+        let entity = sys
+            .actor_of_args::<Entity<Test>, _>("counts", (42, "42".into()))
+            .unwrap();
 
         entity.tell(CQRS::Cmd(TestCmd::Create42), None);
         entity.tell(CQRS::Cmd(TestCmd::Create99), None);
