@@ -6,10 +6,18 @@ use std::ops::RangeTo;
 
 /// An actor that handles the persistance of events of entities
 /// using "commits" to track who made a change and why.  
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Store<T: Aggregate> {
     entities: HashMap<EntityId, (Commit<T>, Vec<Commit<T>>)>,
     bus: Option<EventBus<T>>,
+}
+impl<T: Aggregate> Default for Store<T> {
+    fn default() -> Self {
+        Self {
+            bus: None,
+            entities: HashMap::new(),
+        }
+    }
 }
 
 type Author = Option<String>;
@@ -200,7 +208,7 @@ pub(crate) mod tests {
         pub fn new(c: i16) -> Self {
             Self {
                 count: c,
-                ..Default::default()
+                id: EntityId::new(),
             }
         }
     }
