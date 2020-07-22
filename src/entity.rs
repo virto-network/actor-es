@@ -26,7 +26,7 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
     type Cmd: Message;
     type Event: Message;
 
-    fn new(args: Self::Args) -> Self;
+    fn new(cx: &Context<CQRS<Self::Cmd, Self::Event>>, args: Self::Args) -> Self;
 
     async fn handle_command<Ctx: Sys>(&self, cmd: Self::Cmd, ctx: Ctx, store: StoreRef<Self::Agg>);
 
@@ -42,7 +42,8 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
 /// Entity is an actor that dispatches commands and manages aggregates that are being queried
 pub struct Entity<E: ES> {
     store: Option<StoreRef<E::Agg>>,
-    es: Arc<Mutex<E>>,
+    args: E::Args,
+    es: Option<Arc<Mutex<E>>>,
 }
 
 impl<E, Args> ActorFactoryArgs<Args> for Entity<E>
@@ -53,7 +54,8 @@ where
     fn create_args(args: Args) -> Self {
         Entity {
             store: None,
-            es: Arc::new(Mutex::new(E::new(args))),
+            es: None,
+            args,
         }
     }
 }
@@ -62,6 +64,7 @@ impl<E: ES> Actor for Entity<E> {
     type Msg = CQRS<E::Cmd, E::Event>;
 
     fn pre_start(&mut self, ctx: &Context<Self::Msg>) {
+        self.es = Some(Arc::new(Mutex::new(E::new(ctx, self.args.clone()))));
         self.store = Some(ctx.actor_of::<Store<E::Agg>>(ctx.myself().name()).unwrap());
     }
 
@@ -74,7 +77,11 @@ impl<E: ES> Actor for Entity<E> {
                 let es = self.es.clone();
                 ctx.system.exec.spawn_ok(async move {
                     debug!("processing command {:?}", cmd.clone());
-                    es.lock().await.handle_command(cmd, sys, store).await;
+                    es.unwrap()
+                        .lock()
+                        .await
+                        .handle_command(cmd, sys, store)
+                        .await;
                 });
             }
             CQRS::Event(event) => {
@@ -83,7 +90,11 @@ impl<E: ES> Actor for Entity<E> {
                 let es = self.es.clone();
                 ctx.system.exec.spawn_ok(async move {
                     debug!("processing event {:?}", event.clone());
-                    es.lock().await.handle_event(event, sys, store).await;
+                    es.unwrap()
+                        .lock()
+                        .await
+                        .handle_event(event, sys, store)
+                        .await;
                 });
             }
         };
@@ -127,8 +138,11 @@ mod tests {
     use riker_patterns::ask::ask;
     use std::time::Duration;
 
-    #[derive(Default, Debug)]
-    struct Test(String);
+    #[derive(Debug)]
+    struct Test {
+        sys: ActorSystem,
+        _foo: String,
+    }
     #[async_trait]
     impl ES for Test {
         type Args = (u8, String);
@@ -136,8 +150,11 @@ mod tests {
         type Cmd = TestCmd;
         type Event = ();
 
-        fn new((num, txt): Self::Args) -> Self {
-            Test(format!("{}{}", num, txt))
+        fn new(cx: &Context<CQRS<Self::Cmd, Self::Event>>, (num, txt): Self::Args) -> Self {
+            Test {
+                _foo: format!("{}{}", num, txt),
+                sys: cx.system.clone(),
+            }
         }
 
         async fn handle_command<Ctx: Sys>(
