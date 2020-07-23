@@ -25,17 +25,24 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
     type Agg: Aggregate;
     type Cmd: Message;
     type Event: Message;
+    type Error: fmt::Debug;
 
     fn new(cx: &Context<CQRS<Self::Cmd, Self::Event>>, args: Self::Args) -> Self;
 
-    async fn handle_command<Ctx: Sys>(&self, cmd: Self::Cmd, ctx: Ctx, store: StoreRef<Self::Agg>);
+    async fn handle_command(
+        &self,
+        _cmd: Self::Cmd,
+        _store: StoreRef<Self::Agg>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
-    async fn handle_event<Ctx: Sys>(
+    async fn handle_event(
         &self,
         _event: Self::Event,
-        _ctx: Ctx,
         _store: StoreRef<Self::Agg>,
-    ) {
+    ) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -72,7 +79,6 @@ impl<E: ES> Actor for Entity<E> {
         match msg {
             CQRS::Query(q) => self.receive(ctx, q, sender),
             CQRS::Cmd(cmd) => {
-                let sys = ctx.system.clone();
                 let store = self.store.as_ref().unwrap().clone();
                 let es = self.es.clone();
                 ctx.system.exec.spawn_ok(async move {
@@ -80,12 +86,12 @@ impl<E: ES> Actor for Entity<E> {
                     es.unwrap()
                         .lock()
                         .await
-                        .handle_command(cmd, sys, store)
-                        .await;
+                        .handle_command(cmd, store)
+                        .await
+                        .expect("Failed handling command");
                 });
             }
             CQRS::Event(event) => {
-                let sys = ctx.system.clone();
                 let store = self.store.as_ref().unwrap().clone();
                 let es = self.es.clone();
                 ctx.system.exec.spawn_ok(async move {
@@ -93,8 +99,9 @@ impl<E: ES> Actor for Entity<E> {
                     es.unwrap()
                         .lock()
                         .await
-                        .handle_event(event, sys, store)
-                        .await;
+                        .handle_event(event, store)
+                        .await
+                        .expect("Failed handling event");
                 });
             }
         };
@@ -149,6 +156,7 @@ mod tests {
         type Agg = TestCount;
         type Cmd = TestCmd;
         type Event = ();
+        type Error = String;
 
         fn new(cx: &Context<CQRS<Self::Cmd, Self::Event>>, (num, txt): Self::Args) -> Self {
             Test {
@@ -157,20 +165,20 @@ mod tests {
             }
         }
 
-        async fn handle_command<Ctx: Sys>(
+        async fn handle_command(
             &self,
             cmd: Self::Cmd,
-            cx: Ctx,
             store: StoreRef<Self::Agg>,
-        ) {
+        ) -> Result<(), Self::Error> {
             match cmd {
                 TestCmd::Create42 => store.tell(Event::Create(TestCount::new(42)), None),
                 TestCmd::Create99 => store.tell(Event::Create(TestCount::new(99)), None),
                 TestCmd::Double(id) => {
-                    let res: TestCount = ask(&cx, &store, (id, Utc::now())).await;
+                    let res: TestCount = ask(&self.sys, &store, (id, Utc::now())).await;
                     store.tell(Event::Update(res.id(), Op::Add(res.count)), None)
                 }
-            }
+            };
+            Ok(())
         }
     }
     #[derive(Clone, Debug)]
