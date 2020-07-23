@@ -30,7 +30,7 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
     fn new(cx: &Context<CQRS<Self::Cmd, Self::Event>>, args: Self::Args) -> Self;
 
     async fn handle_command(
-        &self,
+        &mut self,
         _cmd: Self::Cmd,
         _store: StoreRef<Self::Agg>,
     ) -> Result<(), Self::Error> {
@@ -38,7 +38,7 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
     }
 
     async fn handle_event(
-        &self,
+        &mut self,
         _event: Self::Event,
         _store: StoreRef<Self::Agg>,
     ) -> Result<(), Self::Error> {
@@ -166,7 +166,7 @@ mod tests {
         }
 
         async fn handle_command(
-            &self,
+            &mut self,
             cmd: Self::Cmd,
             store: StoreRef<Self::Agg>,
         ) -> Result<(), Self::Error> {
