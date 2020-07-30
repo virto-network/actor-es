@@ -27,7 +27,7 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
     type Event: Message;
     type Error: fmt::Debug;
 
-    fn new(cx: &Context<CQRS<Self::Cmd, Self::Event>>, args: Self::Args) -> Self;
+    fn new(cx: &Context<CQRS<Self::Cmd>>, args: Self::Args) -> Self;
 
     async fn handle_command(
         &mut self,
@@ -68,7 +68,7 @@ where
 }
 
 impl<E: ES> Actor for Entity<E> {
-    type Msg = CQRS<E::Cmd, E::Event>;
+    type Msg = CQRS<E::Cmd>;
 
     fn pre_start(&mut self, ctx: &Context<Self::Msg>) {
         self.es = Some(Arc::new(Mutex::new(E::new(ctx, self.args.clone()))));
@@ -91,25 +91,12 @@ impl<E: ES> Actor for Entity<E> {
                         .expect("Failed handling command");
                 });
             }
-            CQRS::Event(event) => {
-                let store = self.store.as_ref().unwrap().clone();
-                let es = self.es.clone();
-                ctx.system.exec.spawn_ok(async move {
-                    debug!("processing event {:?}", event.clone());
-                    es.unwrap()
-                        .lock()
-                        .await
-                        .handle_event(event, store)
-                        .await
-                        .expect("Failed handling event");
-                });
-            }
         };
     }
 }
 
 impl<E: ES> Receive<Query> for Entity<E> {
-    type Msg = CQRS<E::Cmd, E::Event>;
+    type Msg = CQRS<E::Cmd>;
     fn receive(&mut self, _ctx: &Context<Self::Msg>, q: Query, sender: Sender) {
         match q {
             Query::One(id) => self.store.as_ref().unwrap().tell((id, Utc::now()), sender),
@@ -119,12 +106,11 @@ impl<E: ES> Receive<Query> for Entity<E> {
 }
 
 #[derive(Clone, Debug)]
-pub enum CQRS<C, E> {
+pub enum CQRS<C> {
     Cmd(C),
-    Event(E),
     Query(Query),
 }
-impl<C, E> From<Query> for CQRS<C, E> {
+impl<C> From<Query> for CQRS<C> {
     fn from(q: Query) -> Self {
         CQRS::Query(q)
     }
@@ -158,7 +144,7 @@ mod tests {
         type Event = ();
         type Error = String;
 
-        fn new(cx: &Context<CQRS<Self::Cmd, Self::Event>>, (num, txt): Self::Args) -> Self {
+        fn new(cx: &Context<CQRS<Self::Cmd>>, (num, txt): Self::Args) -> Self {
             Test {
                 _foo: format!("{}{}", num, txt),
                 sys: cx.system.clone(),
