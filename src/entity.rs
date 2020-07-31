@@ -1,4 +1,4 @@
-use crate::{EntityId, Store, StoreMsg};
+use crate::{Commit, EntityId, Store, StoreMsg};
 use async_trait::async_trait;
 use chrono::prelude::*;
 use futures::lock::Mutex;
@@ -24,7 +24,6 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
     type Args: ActorArgs;
     type Agg: Aggregate;
     type Cmd: Message;
-    type Event: Message;
     type Error: fmt::Debug;
 
     fn new(cx: &Context<CQRS<Self::Cmd>>, args: Self::Args) -> Self;
@@ -32,17 +31,8 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
     async fn handle_command(
         &mut self,
         _cmd: Self::Cmd,
-        _store: StoreRef<Self::Agg>,
-    ) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    async fn handle_event(
-        &mut self,
-        _event: Self::Event,
-        _store: StoreRef<Self::Agg>,
-    ) -> Result<(), Self::Error> {
-        Ok(())
+    ) -> Result<Option<Commit<Self::Agg>>, Self::Error> {
+        Ok(None)
     }
 }
 
@@ -84,16 +74,20 @@ impl<E: ES> Actor for Entity<E> {
                 ctx.system.exec.spawn_ok(async move {
                     let cmd_dbg = format!("{:?}", cmd);
                     debug!("processing command {}", cmd_dbg);
-                    es.unwrap()
+                    if let Some(event) = es
+                        .unwrap()
                         .lock()
                         .await
-                        .handle_command(cmd, store)
+                        .handle_command(cmd)
                         .await
-                        .expect("Failed handling command");
+                        .expect("Failed handling command")
+                    {
+                        store.tell(event, None);
+                    }
                     if let Some(sender) = sender {
                         let _ = sender
                             .try_tell((), None)
-                            .map_err(|_| warn!("Couldn't signal completion for {}", cmd_dbg));
+                            .map_err(|_| warn!("Couldn't signal completion of {}", cmd_dbg));
                     }
                 });
             }
@@ -129,7 +123,6 @@ pub enum Query {
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::*;
     use crate::store::tests::{Op, TestCount};
@@ -141,6 +134,7 @@ mod tests {
     #[derive(Debug)]
     struct Test {
         sys: ActorSystem,
+        entity: ActorRef<CQRS<<Self as ES>::Cmd>>,
         _foo: String,
     }
     #[async_trait]
@@ -148,30 +142,29 @@ mod tests {
         type Args = (u8, String);
         type Agg = TestCount;
         type Cmd = TestCmd;
-        type Event = ();
         type Error = String;
 
         fn new(cx: &Context<CQRS<Self::Cmd>>, (num, txt): Self::Args) -> Self {
             Test {
                 _foo: format!("{}{}", num, txt),
                 sys: cx.system.clone(),
+                entity: cx.myself(),
             }
         }
 
         async fn handle_command(
             &mut self,
             cmd: Self::Cmd,
-            store: StoreRef<Self::Agg>,
-        ) -> Result<(), Self::Error> {
-            match cmd {
-                TestCmd::Create42 => store.tell(Event::Create(TestCount::new(42)), None),
-                TestCmd::Create99 => store.tell(Event::Create(TestCount::new(99)), None),
+        ) -> Result<Option<Commit<Self::Agg>>, Self::Error> {
+            let event = match cmd {
+                TestCmd::Create42 => Event::Create(TestCount::new(42)),
+                TestCmd::Create99 => Event::Create(TestCount::new(99)),
                 TestCmd::Double(id) => {
-                    let res: TestCount = ask(&self.sys, &store, (id, Utc::now())).await;
-                    store.tell(Event::Update(res.id(), Op::Add(res.count)), None)
+                    let res: TestCount = ask(&self.sys, &self.entity, Query::One(id)).await;
+                    Event::Update(res.id(), Op::Add(res.count))
                 }
             };
-            Ok(())
+            Ok(Some(event.into()))
         }
     }
     #[derive(Clone, Debug)]
