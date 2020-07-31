@@ -82,13 +82,19 @@ impl<E: ES> Actor for Entity<E> {
                 let store = self.store.as_ref().unwrap().clone();
                 let es = self.es.clone();
                 ctx.system.exec.spawn_ok(async move {
-                    debug!("processing command {:?}", cmd.clone());
+                    let cmd_dbg = format!("{:?}", cmd);
+                    debug!("processing command {}", cmd_dbg);
                     es.unwrap()
                         .lock()
                         .await
                         .handle_command(cmd, store)
                         .await
                         .expect("Failed handling command");
+                    if let Some(sender) = sender {
+                        let _ = sender
+                            .try_tell((), None)
+                            .map_err(|_| warn!("Couldn't signal completion for {}", cmd_dbg));
+                    }
                 });
             }
         };
@@ -123,6 +129,7 @@ pub enum Query {
 }
 
 #[cfg(test)]
+
 mod tests {
     use super::*;
     use crate::store::tests::{Op, TestCount};
@@ -181,10 +188,8 @@ mod tests {
             .actor_of_args::<Entity<Test>, _>("counts", (42, "42".into()))
             .unwrap();
 
-        entity.tell(CQRS::Cmd(TestCmd::Create42), None);
-        entity.tell(CQRS::Cmd(TestCmd::Create99), None);
-
-        std::thread::sleep(Duration::from_millis(20));
+        let _: () = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Create42)));
+        let _: () = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Create99)));
         let counts: Vec<TestCount> = block_on(ask(&sys, &entity, Query::All));
 
         assert_eq!(counts.len(), 2);
@@ -194,7 +199,7 @@ mod tests {
         assert!(count99.is_some());
 
         let id = count42.unwrap().id();
-        entity.tell(CQRS::Cmd(TestCmd::Double(id)), None);
+        let _: () = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Double(id))));
         std::thread::sleep(Duration::from_millis(20));
         let result: TestCount = block_on(ask(&sys, &entity, Query::One(id)));
         assert_eq!(result.count, 84);
