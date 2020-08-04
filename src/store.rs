@@ -48,20 +48,21 @@ impl<T: Aggregate> From<Event<T>> for Commit<T> {
 }
 
 impl<T: Aggregate> Store<T> {
-    fn make_snapshot(&self, id: EntityId, _until: DateTime<Utc>) -> T {
-        let (commit, updates) = self.entities.get(&id).unwrap();
+    fn make_snapshot(&self, id: EntityId, _until: DateTime<Utc>) -> Option<T> {
+        let (commit, updates) = self.entities.get(&id)?;
         let entity = match commit.event.clone() {
             Event::Create(e) => e,
             Event::Update(_, _) => unreachable!(),
         };
-        updates.iter().fold(entity, |mut e, up| {
+        let snapshot = updates.iter().fold(entity, |mut e, up| {
             let update = match up.event.clone() {
                 Event::Create(_) => unreachable!(),
                 Event::Update(_, u) => u,
             };
             T::apply_update(&mut e, update);
             e
-        })
+        });
+        Some(snapshot)
     }
 }
 
@@ -142,7 +143,7 @@ impl<T: Aggregate> Receive<RangeTo<DateTime<Utc>>> for Store<T> {
         let snaps = self
             .entities
             .keys()
-            .map(|id| self.make_snapshot(*id, range.end))
+            .map(|id| self.make_snapshot(*id, range.end).unwrap())
             .collect::<Vec<_>>();
         trace!("{:?}", snaps);
         debug!("loaded list of snapshots until {}", range.end);
@@ -243,8 +244,17 @@ pub(crate) mod tests {
         store.tell(Event::Update(id, Op::Sub(9)), None);
         store.tell(Event::Update(id, Op::Add(31)), None);
 
-        let result: TestCount = block_on(ask(&sys, &store, (id, Utc::now())));
-        assert_eq!(result.count, 42);
+        let result: Option<TestCount> = block_on(ask(&sys, &store, (id, Utc::now())));
+        assert_eq!(result.unwrap().count, 42);
+    }
+
+    #[test]
+    fn non_existing_entity() {
+        let sys = ActorSystem::new().unwrap();
+        let store = sys.actor_of::<Store<TestCount>>("test-counts").unwrap();
+
+        let result: Option<TestCount> = block_on(ask(&sys, &store, ("123".into(), Utc::now())));
+        assert!(result.is_none());
     }
 
     #[test]

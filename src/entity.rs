@@ -160,7 +160,8 @@ mod tests {
                 TestCmd::Create42 => Event::Create(TestCount::new(42)),
                 TestCmd::Create99 => Event::Create(TestCount::new(99)),
                 TestCmd::Double(id) => {
-                    let res: TestCount = ask(&self.sys, &self.entity, Query::One(id)).await;
+                    let res: Option<TestCount> = ask(&self.sys, &self.entity, Query::One(id)).await;
+                    let res = res.ok_or("Not found")?;
                     Event::Update(res.id(), Op::Add(res.count))
                 }
             };
@@ -193,8 +194,7 @@ mod tests {
 
         let id = count42.unwrap().id();
         let _: () = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Double(id))));
-        std::thread::sleep(Duration::from_millis(20));
-        let result: TestCount = block_on(ask(&sys, &entity, Query::One(id)));
-        assert_eq!(result.count, 84);
+        let result: Option<TestCount> = block_on(ask(&sys, &entity, Query::One(id)));
+        assert_eq!(result.unwrap().count, 84);
     }
 }
