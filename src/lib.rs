@@ -47,6 +47,11 @@ impl EntityId {
         Default::default()
     }
 }
+impl From<String> for EntityId {
+    fn from(id: String) -> Self {
+        id.as_str().into()
+    }
+}
 impl From<&str> for EntityId {
     fn from(id: &str) -> Self {
         EntityId(Uuid::new_v5(&Uuid::NAMESPACE_URL, id.as_bytes()))

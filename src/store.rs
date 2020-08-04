@@ -29,7 +29,7 @@ pub struct Commit<T: Aggregate> {
     event: Event<T>,
     when: DateTime<Utc>,
     who: Author,
-    why: Option<String>,
+    why: Reason,
 }
 impl<T: Aggregate> Commit<T> {
     pub fn new(event: Event<T>, who: Author, why: Reason) -> Self {
