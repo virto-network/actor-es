@@ -1,6 +1,6 @@
 [package]
 name = "riker-es"
-version = "0.11.0"
+version = "0.12.0"
 authors = ["Daniel Olano <daniel@olanod.com>"]
 edition = "2018"
 description = "An event sourcing + CQRS abstraction on top of Riker"

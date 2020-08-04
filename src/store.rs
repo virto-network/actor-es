@@ -128,7 +128,11 @@ impl<T: Aggregate> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
         sender: Sender,
     ) {
         let snapshot = self.make_snapshot(id, until);
-        debug!("loaded snapshot for {}", id);
+        if snapshot.is_some() {
+            debug!("loaded snapshot for {}", id);
+        } else {
+            debug!("entity {} not in store", id);
+        }
         sender
             .unwrap()
             .try_tell(snapshot, None)

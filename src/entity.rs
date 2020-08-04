@@ -28,12 +28,7 @@ pub trait ES: fmt::Debug + Send + Sync + 'static {
 
     fn new(cx: &Context<CQRS<Self::Cmd>>, args: Self::Args) -> Self;
 
-    async fn handle_command(
-        &mut self,
-        _cmd: Self::Cmd,
-    ) -> Result<Option<Commit<Self::Agg>>, Self::Error> {
-        Ok(None)
-    }
+    async fn handle_command(&mut self, _cmd: Self::Cmd) -> Result<Commit<Self::Agg>, Self::Error>;
 }
 
 /// Entity is an actor that dispatches commands and manages aggregates that are being queried
@@ -74,21 +69,20 @@ impl<E: ES> Actor for Entity<E> {
                 ctx.system.exec.spawn_ok(async move {
                     let cmd_dbg = format!("{:?}", cmd);
                     debug!("processing command {}", cmd_dbg);
-                    if let Some(commit) = es
+                    let commit = es
                         .unwrap()
                         .lock()
                         .await
                         .handle_command(cmd)
                         .await
-                        .expect("Failed handling command")
-                    {
-                        let entity_id = commit.entity_id();
-                        store.tell(commit, None);
-                        if let Some(sender) = sender {
-                            let _ = sender
-                                .try_tell(entity_id, None)
-                                .map_err(|_| warn!("Couldn't signal completion of {}", cmd_dbg));
-                        }
+                        .expect("Failed handling command");
+                    let entity_id = commit.entity_id();
+                    store.tell(commit, None);
+
+                    if let Some(sender) = sender {
+                        let _ = sender
+                            .try_tell(entity_id, None)
+                            .map_err(|_| warn!("Couldn't signal completion of {}", cmd_dbg));
                     }
                 });
             }
@@ -155,7 +149,7 @@ mod tests {
         async fn handle_command(
             &mut self,
             cmd: Self::Cmd,
-        ) -> Result<Option<Commit<Self::Agg>>, Self::Error> {
+        ) -> Result<Commit<Self::Agg>, Self::Error> {
             let event = match cmd {
                 TestCmd::Create42 => Event::Create(TestCount::new(42)),
                 TestCmd::Create99 => Event::Create(TestCount::new(99)),
@@ -165,7 +159,7 @@ mod tests {
                     Event::Update(res.id(), Op::Add(res.count))
                 }
             };
-            Ok(Some(event.into()))
+            Ok(event.into())
         }
     }
     #[derive(Clone, Debug)]
