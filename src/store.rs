@@ -40,6 +40,10 @@ impl<T: Aggregate> Commit<T> {
             why,
         }
     }
+
+    pub fn entity_id(&self) -> EntityId {
+        self.event.entity_id()
+    }
 }
 impl<T: Aggregate> From<Event<T>> for Commit<T> {
     fn from(e: Event<T>) -> Self {

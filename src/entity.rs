@@ -74,7 +74,7 @@ impl<E: ES> Actor for Entity<E> {
                 ctx.system.exec.spawn_ok(async move {
                     let cmd_dbg = format!("{:?}", cmd);
                     debug!("processing command {}", cmd_dbg);
-                    if let Some(event) = es
+                    if let Some(commit) = es
                         .unwrap()
                         .lock()
                         .await
@@ -82,12 +82,13 @@ impl<E: ES> Actor for Entity<E> {
                         .await
                         .expect("Failed handling command")
                     {
-                        store.tell(event, None);
-                    }
-                    if let Some(sender) = sender {
-                        let _ = sender
-                            .try_tell((), None)
-                            .map_err(|_| warn!("Couldn't signal completion of {}", cmd_dbg));
+                        let entity_id = commit.entity_id();
+                        store.tell(commit, None);
+                        if let Some(sender) = sender {
+                            let _ = sender
+                                .try_tell(entity_id, None)
+                                .map_err(|_| warn!("Couldn't signal completion of {}", cmd_dbg));
+                        }
                     }
                 });
             }
@@ -129,7 +130,6 @@ mod tests {
     use crate::Event;
     use futures::executor::block_on;
     use riker_patterns::ask::ask;
-    use std::time::Duration;
 
     #[derive(Debug)]
     struct Test {
@@ -182,8 +182,8 @@ mod tests {
             .actor_of_args::<Entity<Test>, _>("counts", (42, "42".into()))
             .unwrap();
 
-        let _: () = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Create42)));
-        let _: () = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Create99)));
+        let _: EntityId = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Create42)));
+        let _: EntityId = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Create99)));
         let counts: Vec<TestCount> = block_on(ask(&sys, &entity, Query::All));
 
         assert_eq!(counts.len(), 2);
@@ -193,7 +193,7 @@ mod tests {
         assert!(count99.is_some());
 
         let id = count42.unwrap().id();
-        let _: () = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Double(id))));
+        let _: EntityId = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Double(id))));
         let result: Option<TestCount> = block_on(ask(&sys, &entity, Query::One(id)));
         assert_eq!(result.unwrap().count, 84);
     }
