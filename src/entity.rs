@@ -1,4 +1,4 @@
-use crate::{Commit, EntityId, Store, StoreMsg};
+use crate::{Commit, EntityId, EntityName, Store, StoreMsg};
 use async_trait::async_trait;
 use chrono::prelude::*;
 use futures::lock::Mutex;
@@ -14,13 +14,21 @@ pub trait Aggregate: Message {
     fn apply_update(&mut self, update: Self::Update);
 }
 
+impl Aggregate for () {
+    type Update = ();
+    fn id(&self) -> EntityId {
+        "dummy".into()
+    }
+    fn apply_update(&mut self, _update: Self::Update) {}
+}
+
 pub type StoreRef<A> = ActorRef<StoreMsg<A>>;
 pub trait Sys: TmpActorRefFactory + Run + Send + Sync {}
 impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 
 /// Implement this trait to allow your entity handle external commands
 #[async_trait]
-pub trait ES: fmt::Debug + Send + Sync + 'static {
+pub trait ES: EntityName + fmt::Debug + Send + Sync + 'static {
     type Args: ActorArgs;
     type Agg: Aggregate;
     type Cmd: Message;
@@ -130,6 +138,9 @@ mod tests {
         sys: ActorSystem,
         entity: ActorRef<CQRS<<Self as ES>::Cmd>>,
         _foo: String,
+    }
+    impl EntityName for Test {
+        const NAME: &'static str = "test-entity";
     }
     #[async_trait]
     impl ES for Test {
