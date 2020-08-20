@@ -79,7 +79,12 @@ impl Model for MyData {
   }
 }
 ```
-Later the state of an entity can be queried with the entity actor.
+### Dispatching commands and queries
+RikerES provides an entity manager that will hold references to your registered entities
+and provide a simpler API to send commands and queries to the right entity.
 ```rust
-let my_data: MyData = ask(&actor_system, &entity, Query::One("123".into())).await;
+let mgr = Manager::new(actor_system).register::<MyEntity>(SomeArgs);
+
+let id = mgr.command(MyEntityCommands::DoSomething).await;
+let data = mgr.query::<MyEntity>(id).await.unwrap();
 ```

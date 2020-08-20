@@ -17,6 +17,10 @@ impl Manager {
         }
     }
 
+    pub fn sys(&self) -> &ActorSystem {
+        &self.sys
+    }
+
     pub fn register<T: ES + EntityName>(mut self, args: T::Args) -> Self {
         let entity = self
             .sys
