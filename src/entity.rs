@@ -8,18 +8,19 @@ use std::sync::Arc;
 
 /// An Aggregate is the projected data of a series of events of an entity,
 /// given an initial state update events are applied to it until it reaches the desired state.
-pub trait Aggregate: Message {
-    type Update: Message;
+pub trait Model: Message {
+    type Change: Message;
     fn id(&self) -> EntityId;
-    fn apply_update(&mut self, update: Self::Update);
+    fn apply_change(&mut self, change: Self::Change);
 }
 
-impl Aggregate for () {
-    type Update = ();
+// Dummy data model for tests
+impl Model for () {
+    type Change = ();
     fn id(&self) -> EntityId {
         "dummy".into()
     }
-    fn apply_update(&mut self, _update: Self::Update) {}
+    fn apply_change(&mut self, _update: Self::Change) {}
 }
 
 pub type StoreRef<A> = ActorRef<StoreMsg<A>>;
@@ -30,18 +31,19 @@ impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 #[async_trait]
 pub trait ES: EntityName + fmt::Debug + Send + Sync + 'static {
     type Args: ActorArgs;
-    type Agg: Aggregate;
+    type Model: Model;
     type Cmd: Message;
     type Error: fmt::Debug;
 
     fn new(cx: &Context<CQRS<Self::Cmd>>, args: Self::Args) -> Self;
 
-    async fn handle_command(&mut self, _cmd: Self::Cmd) -> Result<Commit<Self::Agg>, Self::Error>;
+    async fn handle_command(&mut self, _cmd: Self::Cmd)
+        -> Result<Commit<Self::Model>, Self::Error>;
 }
 
 /// Entity is an actor that dispatches commands and manages aggregates that are being queried
 pub struct Entity<E: ES> {
-    store: Option<StoreRef<E::Agg>>,
+    store: Option<StoreRef<E::Model>>,
     args: E::Args,
     es: Option<Arc<Mutex<E>>>,
 }
@@ -65,7 +67,10 @@ impl<E: ES> Actor for Entity<E> {
 
     fn pre_start(&mut self, ctx: &Context<Self::Msg>) {
         self.es = Some(Arc::new(Mutex::new(E::new(ctx, self.args.clone()))));
-        self.store = Some(ctx.actor_of::<Store<E::Agg>>(ctx.myself().name()).unwrap());
+        self.store = Some(
+            ctx.actor_of::<Store<E::Model>>(ctx.myself().name())
+                .unwrap(),
+        );
     }
 
     fn recv(&mut self, ctx: &Context<Self::Msg>, msg: Self::Msg, sender: Sender) {
@@ -145,7 +150,7 @@ mod tests {
     #[async_trait]
     impl ES for Test {
         type Args = (u8, String);
-        type Agg = TestCount;
+        type Model = TestCount;
         type Cmd = TestCmd;
         type Error = String;
 
@@ -160,14 +165,14 @@ mod tests {
         async fn handle_command(
             &mut self,
             cmd: Self::Cmd,
-        ) -> Result<Commit<Self::Agg>, Self::Error> {
+        ) -> Result<Commit<Self::Model>, Self::Error> {
             let event = match cmd {
                 TestCmd::Create42 => Event::Create(TestCount::new(42)),
                 TestCmd::Create99 => Event::Create(TestCount::new(99)),
                 TestCmd::Double(id) => {
                     let res: Option<TestCount> = ask(&self.sys, &self.entity, Query::One(id)).await;
                     let res = res.ok_or("Not found")?;
-                    Event::Update(res.id(), Op::Add(res.count))
+                    Event::Change(res.id(), Op::Add(res.count))
                 }
             };
             Ok(event.into())

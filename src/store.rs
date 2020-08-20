@@ -1,4 +1,4 @@
-use crate::{Aggregate, EntityId, Event, EventBus};
+use crate::{EntityId, Event, EventBus, Model};
 use chrono::prelude::*;
 use riker::actors::*;
 use std::collections::HashMap;
@@ -7,11 +7,11 @@ use std::ops::RangeTo;
 /// An actor that handles the persistance of events of entities
 /// using "commits" to track who made a change and why.  
 #[derive(Debug)]
-pub struct Store<T: Aggregate> {
+pub struct Store<T: Model> {
     entities: HashMap<EntityId, (Commit<T>, Vec<Commit<T>>)>,
     bus: Option<EventBus<T>>,
 }
-impl<T: Aggregate> Default for Store<T> {
+impl<T: Model> Default for Store<T> {
     fn default() -> Self {
         Self {
             bus: None,
@@ -25,13 +25,13 @@ type Reason = Option<String>;
 
 /// Commits represent changes to the system about to be persisted
 #[derive(Debug, Clone)]
-pub struct Commit<T: Aggregate> {
+pub struct Commit<T: Model> {
     event: Event<T>,
     when: DateTime<Utc>,
     who: Author,
     why: Reason,
 }
-impl<T: Aggregate> Commit<T> {
+impl<T: Model> Commit<T> {
     pub fn new(event: Event<T>, who: Author, why: Reason) -> Self {
         Commit {
             event,
@@ -45,32 +45,32 @@ impl<T: Aggregate> Commit<T> {
         self.event.entity_id()
     }
 }
-impl<T: Aggregate> From<Event<T>> for Commit<T> {
+impl<T: Model> From<Event<T>> for Commit<T> {
     fn from(e: Event<T>) -> Self {
         Commit::new(e, None, None)
     }
 }
 
-impl<T: Aggregate> Store<T> {
+impl<T: Model> Store<T> {
     fn make_snapshot(&self, id: EntityId, _until: DateTime<Utc>) -> Option<T> {
         let (commit, updates) = self.entities.get(&id)?;
         let entity = match commit.event.clone() {
             Event::Create(e) => e,
-            Event::Update(_, _) => unreachable!(),
+            Event::Change(_, _) => unreachable!(),
         };
         let snapshot = updates.iter().fold(entity, |mut e, up| {
             let update = match up.event.clone() {
                 Event::Create(_) => unreachable!(),
-                Event::Update(_, u) => u,
+                Event::Change(_, u) => u,
             };
-            T::apply_update(&mut e, update);
+            T::apply_change(&mut e, update);
             e
         });
         Some(snapshot)
     }
 }
 
-impl<T: Aggregate> Actor for Store<T> {
+impl<T: Model> Actor for Store<T> {
     type Msg = StoreMsg<T>;
     fn recv(&mut self, cx: &Context<Self::Msg>, msg: Self::Msg, sender: Sender) {
         match msg {
@@ -82,7 +82,7 @@ impl<T: Aggregate> Actor for Store<T> {
     }
 }
 
-impl<T: Aggregate> ActorFactoryArgs<EventBus<T>> for Store<T> {
+impl<T: Model> ActorFactoryArgs<EventBus<T>> for Store<T> {
     fn create_args(bus: EventBus<T>) -> Self {
         Store {
             bus: Some(bus),
@@ -91,7 +91,7 @@ impl<T: Aggregate> ActorFactoryArgs<EventBus<T>> for Store<T> {
     }
 }
 
-impl<T: Aggregate> Receive<Commit<T>> for Store<T> {
+impl<T: Model> Receive<Commit<T>> for Store<T> {
     type Msg = StoreMsg<T>;
     fn receive(&mut self, cx: &Context<Self::Msg>, c: Commit<T>, _sender: Sender) {
         trace!("storing {:?}", c);
@@ -101,7 +101,7 @@ impl<T: Aggregate> Receive<Commit<T>> for Store<T> {
             Event::Create(_) => {
                 self.entities.insert(id, (commit, vec![]));
             }
-            Event::Update(_, _) => {
+            Event::Change(_, _) => {
                 let (_, updates) = self.entities.get_mut(&id).expect("entity exists");
                 updates.push(commit);
             }
@@ -119,7 +119,7 @@ impl<T: Aggregate> Receive<Commit<T>> for Store<T> {
     }
 }
 
-impl<T: Aggregate> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
+impl<T: Model> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
     type Msg = StoreMsg<T>;
     fn receive(
         &mut self,
@@ -140,7 +140,7 @@ impl<T: Aggregate> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
     }
 }
 
-impl<T: Aggregate> Receive<RangeTo<DateTime<Utc>>> for Store<T> {
+impl<T: Model> Receive<RangeTo<DateTime<Utc>>> for Store<T> {
     type Msg = StoreMsg<T>;
     fn receive(
         &mut self,
@@ -162,7 +162,7 @@ impl<T: Aggregate> Receive<RangeTo<DateTime<Utc>>> for Store<T> {
     }
 }
 
-impl<T: Aggregate> Receive<EntityId> for Store<T> {
+impl<T: Model> Receive<EntityId> for Store<T> {
     type Msg = StoreMsg<T>;
     fn receive(&mut self, _cx: &Context<Self::Msg>, _id: EntityId, _sender: Sender) {
         todo!();
@@ -170,33 +170,33 @@ impl<T: Aggregate> Receive<EntityId> for Store<T> {
 }
 
 #[derive(Debug, Clone)]
-pub enum StoreMsg<T: Aggregate> {
+pub enum StoreMsg<T: Model> {
     Commit(Commit<T>),
     Snapshot((EntityId, DateTime<Utc>)),
     SnapshotList(RangeTo<DateTime<Utc>>),
     Subscribe(EntityId),
 }
-impl<T: Aggregate> From<Event<T>> for StoreMsg<T> {
+impl<T: Model> From<Event<T>> for StoreMsg<T> {
     fn from(msg: Event<T>) -> Self {
         StoreMsg::Commit(msg.into())
     }
 }
-impl<T: Aggregate> From<RangeTo<DateTime<Utc>>> for StoreMsg<T> {
+impl<T: Model> From<RangeTo<DateTime<Utc>>> for StoreMsg<T> {
     fn from(range: RangeTo<DateTime<Utc>>) -> Self {
         StoreMsg::SnapshotList(range)
     }
 }
-impl<T: Aggregate> From<Commit<T>> for StoreMsg<T> {
+impl<T: Model> From<Commit<T>> for StoreMsg<T> {
     fn from(msg: Commit<T>) -> Self {
         StoreMsg::Commit(msg)
     }
 }
-impl<T: Aggregate> From<EntityId> for StoreMsg<T> {
+impl<T: Model> From<EntityId> for StoreMsg<T> {
     fn from(id: EntityId) -> Self {
         StoreMsg::Subscribe(id)
     }
 }
-impl<T: Aggregate> From<(EntityId, DateTime<Utc>)> for StoreMsg<T> {
+impl<T: Model> From<(EntityId, DateTime<Utc>)> for StoreMsg<T> {
     fn from(snap: (EntityId, DateTime<Utc>)) -> Self {
         StoreMsg::Snapshot(snap)
     }
@@ -226,13 +226,13 @@ pub(crate) mod tests {
         Add(i16),
         Sub(i16),
     }
-    impl Aggregate for TestCount {
-        type Update = Op;
+    impl Model for TestCount {
+        type Change = Op;
         fn id(&self) -> EntityId {
             self.id
         }
-        fn apply_update(&mut self, update: Self::Update) {
-            match update {
+        fn apply_change(&mut self, change: Self::Change) {
+            match change {
                 Op::Add(n) => self.count += n,
                 Op::Sub(n) => self.count -= n,
             };
@@ -247,10 +247,10 @@ pub(crate) mod tests {
         let test = TestCount::default();
         let id = test.id();
         store.tell(Event::Create(test), None);
-        store.tell(Event::Update(id, Op::Add(15)), None);
-        store.tell(Event::Update(id, Op::Add(5)), None);
-        store.tell(Event::Update(id, Op::Sub(9)), None);
-        store.tell(Event::Update(id, Op::Add(31)), None);
+        store.tell(Event::Change(id, Op::Add(15)), None);
+        store.tell(Event::Change(id, Op::Add(5)), None);
+        store.tell(Event::Change(id, Op::Sub(9)), None);
+        store.tell(Event::Change(id, Op::Add(31)), None);
 
         let result: Option<TestCount> = block_on(ask(&sys, &store, (id, Utc::now())));
         assert_eq!(result.unwrap().count, 42);
@@ -277,7 +277,7 @@ pub(crate) mod tests {
         store.tell(Event::Create(some_counter), None);
         store.tell(Event::Create(TestCount::default()), None);
         store.tell(Event::Create(TestCount::default()), None);
-        store.tell(Event::Update("123".into(), Op::Add(8)), None);
+        store.tell(Event::Change("123".into(), Op::Add(8)), None);
 
         let result: Vec<TestCount> = block_on(ask(&sys, &store, ..Utc::now()));
         assert_eq!(result.len(), 3);

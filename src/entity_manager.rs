@@ -34,7 +34,7 @@ impl Manager {
         self.ask(entity, CQRS::Cmd(cmd)).await
     }
 
-    pub async fn query<E>(&self, id: EntityId) -> Option<E::Agg>
+    pub async fn query<E>(&self, id: EntityId) -> Option<E::Model>
     where
         E: ES + EntityName,
     {
@@ -102,7 +102,7 @@ mod tests {
     #[async_trait]
     impl ES for Entity1 {
         type Args = ();
-        type Agg = ();
+        type Model = ();
         type Cmd = ();
         type Error = ();
         fn new(_cx: &Context<CQRS<Self::Cmd>>, _args: Self::Args) -> Self {
@@ -111,7 +111,7 @@ mod tests {
         async fn handle_command(
             &mut self,
             _cmd: Self::Cmd,
-        ) -> Result<crate::Commit<Self::Agg>, Self::Error> {
+        ) -> Result<crate::Commit<Self::Model>, Self::Error> {
             Ok(Event::Create(()).into())
         }
     }

@@ -18,7 +18,7 @@ struct MyEntity;
 #[async-trait]
 impl ES for MyEntity {
   type Args = SomeArgs; // the arguments passed to the constructor
-  type Agg = MyData; // The "aggregate" is the data that is to be persisted along with its updates.
+  type Model = MyData; // The "aggregate" is the data that is to be persisted along with its updates.
   type Cmd = MyEntityCommands; // The external command or commands(often in the form of an enum) this entity can handle.
   // type Event = (); // TODO: Similar to commands but for handling events emitted by other entities.
   type Error = MyEntityError; // Error produced by the handler functions.
@@ -32,14 +32,14 @@ impl ES for MyEntity {
   async fn handle_command(
     &mut self,
     cmd: Self::Cmd,
-  ) -> Result<Option<Commit<Self::Agg>>, Self::Error> {
+  ) -> Result<Commit<Self::Model>, Self::Error> {
     // do your command handling here and return a commit that will be persited
     // to the configured store(a simple memory store atm).
     
     // when entities are created for the first time
-    Ok(Some(Event::Create(MyData).into()))
+    Ok(Event::Create(MyData).into())
     // or to update an existing entity
-    // Ok(Some(Event::Update("some id".into(), MyDataUpdate).into()))
+    // Ok(Event::Change("some id".into(), MyDataUpdate).into())
   }
 }
 ```
@@ -59,15 +59,15 @@ enum MyDataUpdate {
   LittleChange(String),
 }
 
-impl Aggregate for MyData {
-  type Update = MyDataUpdate;
+impl Model for MyData {
+  type Change = MyDataUpdate;
   
   fn id(&self) -> EntityId {
     self.some_id.into()
   }
   
-  fn apply_update(&mut self, update: Self::Update) {
-    match update {
+  fn apply_change(&mut self, change: Self::Change) {
+    match change {
       MyDataUpdate::TheChange(field, other) => {
         self.some_field = field;
         self.other_field = Some(other);
