@@ -1,6 +1,6 @@
 [package]
 name = "riker-es"
-version = "0.13.2"
+version = "0.13.3"
 authors = ["Daniel Olano <daniel@olanod.com>"]
 edition = "2018"
 description = "An event sourcing + CQRS abstraction on top of Riker"
@@ -12,12 +12,12 @@ keywords = ["cqrs", "event_sourcing", "actor_model"]
 [dependencies]
 async-trait = "0.1.36"
 bson = "1.0.0"
-chrono = { version = "0.4.13", features = ["serde"] }
+chrono = { version = "0.4.13" }
 futures = "0.3.5"
 log = "0.4.8"
 riker = "0.4.1"
-riker-patterns = "0.4.1"
-serde = "1.0.114"
-uuid = { version = "0.8.1", features = ["serde", "v4", "v5"] }
+uuid = { version = "0.8.1", features = ["v4", "v5"] }
 
 [dev-dependencies]
+riker-patterns = "0.4.1"
+

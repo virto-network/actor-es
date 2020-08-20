@@ -70,6 +70,8 @@ impl<T: Model> Store<T> {
     }
 }
 
+pub type StoreRef<A> = ActorRef<StoreMsg<A>>;
+
 impl<T: Model> Actor for Store<T> {
     type Msg = StoreMsg<T>;
     fn recv(&mut self, cx: &Context<Self::Msg>, msg: Self::Msg, sender: Sender) {

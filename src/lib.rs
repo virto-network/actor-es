@@ -5,10 +5,9 @@ use riker::actors::ChannelRef;
 use std::fmt;
 use uuid::Uuid;
 
-pub use entity::{Entity, Model, Query, StoreRef, Sys, CQRS, ES};
+pub use entity::{Entity, Model, Query, Result, CQRS, ES};
 pub use entity_manager::{EntityName, Manager};
-pub use riker_patterns::ask::ask;
-pub use store::{Commit, Store, StoreMsg};
+pub use store::{Commit, Store, StoreMsg, StoreRef};
 
 pub type EventBus<T> = ChannelRef<Event<T>>;
 

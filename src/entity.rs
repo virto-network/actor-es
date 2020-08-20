@@ -27,6 +27,8 @@ pub type StoreRef<A> = ActorRef<StoreMsg<A>>;
 pub trait Sys: TmpActorRefFactory + Run + Send + Sync {}
 impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 
+pub type Result<E> = std::result::Result<Commit<<E as ES>::Model>, <E as ES>::Error>;
+
 /// Implement this trait to allow your entity handle external commands
 #[async_trait]
 pub trait ES: EntityName + fmt::Debug + Send + Sync + 'static {
@@ -35,13 +37,17 @@ pub trait ES: EntityName + fmt::Debug + Send + Sync + 'static {
     type Cmd: Message;
     type Error: fmt::Debug;
 
+    /// The entity constructor receives a Riker context to be able to interact
+    /// with other actors.
     fn new(cx: &Context<CQRS<Self::Cmd>>, args: Self::Args) -> Self;
 
-    async fn handle_command(&mut self, _cmd: Self::Cmd)
-        -> Result<Commit<Self::Model>, Self::Error>;
+    async fn handle_command(&mut self, _cmd: Self::Cmd) -> Result<Self>;
 }
 
-/// Entity is an actor that dispatches commands and manages aggregates that are being queried
+/// Entity is an actor that handles user commands running the buissiness logic defined
+/// in the handler callback and "commit" changes of the model to the configured
+/// event store. Will also use the store to query a stored entity data applying any
+/// change that has been recorded up to the specified moment in time.
 pub struct Entity<E: ES> {
     store: Option<StoreRef<E::Model>>,
     args: E::Args,
@@ -162,10 +168,7 @@ mod tests {
             }
         }
 
-        async fn handle_command(
-            &mut self,
-            cmd: Self::Cmd,
-        ) -> Result<Commit<Self::Model>, Self::Error> {
+        async fn handle_command(&mut self, cmd: Self::Cmd) -> Result<Self> {
             let event = match cmd {
                 TestCmd::Create42 => Event::Create(TestCount::new(42)),
                 TestCmd::Create99 => Event::Create(TestCount::new(99)),

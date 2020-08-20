@@ -30,10 +30,7 @@ impl ES for MyEntity {
     MyEntity
   }
   
-  async fn handle_command(
-    &mut self,
-    cmd: Self::Cmd,
-  ) -> Result<Commit<Self::Model>, Self::Error> {
+  async fn handle_command(&mut self, cmd: Self::Cmd) -> Result<Self> {
     // do your command handling here and return a commit that will be persited
     // to the configured store(a simple memory store atm).
     
