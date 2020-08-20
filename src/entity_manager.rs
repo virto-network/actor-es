@@ -1,4 +1,4 @@
-use crate::{Entity, EntityId, Query, CQRS, ES};
+use crate::{Entity, EntityId, EntityName, Query, CQRS, ES};
 use futures::channel::oneshot::{channel, Sender as ChannelSender};
 use riker::actors::*;
 use std::collections::HashMap;
@@ -61,12 +61,6 @@ impl Manager {
     }
 }
 
-// NOTE: work around to get entity name for commands
-// TODO derive from implementor struct name
-pub trait EntityName {
-    const NAME: &'static str;
-}
-
 struct AskActor<Msg> {
     tx: Arc<Mutex<Option<ChannelSender<Msg>>>>,
 }
@@ -91,17 +85,14 @@ impl<Msg: Message> Actor for AskActor<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Event;
+    use crate::{macros::*, Event};
     use async_trait::async_trait;
     use futures::executor::block_on;
 
-    #[derive(Debug)]
+    #[derive(EntityName, Debug)]
     struct Entity1;
-    impl EntityName for Entity1 {
-        const NAME: &'static str = "entity-1";
-    }
     impl EntityName for () {
-        const NAME: &'static str = "entity-1";
+        const NAME: &'static str = "Entity1";
     }
     #[async_trait]
     impl ES for Entity1 {

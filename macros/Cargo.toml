@@ -1,0 +1,17 @@
+[package]
+name = "riker-es-macros"
+version = "0.1.0"
+authors = ["Daniel Olano <daniel@olanod.com>"]
+edition = "2018"
+description = "Proc macros for riker-es"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Valiuapp/riker-es"
+keywords = ["cqrs", "event_sourcing", "actor_model"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "1.0"
+quote = "1.0"
+

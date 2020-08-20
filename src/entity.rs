@@ -1,4 +1,4 @@
-use crate::{Commit, EntityId, EntityName, Store, StoreMsg};
+use crate::{Commit, EntityId, Store, StoreRef};
 use async_trait::async_trait;
 use chrono::prelude::*;
 use futures::lock::Mutex;
@@ -22,10 +22,6 @@ impl Model for () {
     }
     fn apply_change(&mut self, _update: Self::Change) {}
 }
-
-pub type StoreRef<A> = ActorRef<StoreMsg<A>>;
-pub trait Sys: TmpActorRefFactory + Run + Send + Sync {}
-impl<T: TmpActorRefFactory + Run + Send + Sync> Sys for T {}
 
 pub type Result<E> = std::result::Result<Commit<<E as ES>::Model>, <E as ES>::Error>;
 
@@ -136,22 +132,25 @@ pub enum Query {
     One(EntityId),
 }
 
+// NOTE: work around to get entity name for commands
+// TODO derive from implementor struct name
+pub trait EntityName {
+    const NAME: &'static str;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::tests::{Op, TestCount};
-    use crate::Event;
+    use crate::{macros::*, Event};
     use futures::executor::block_on;
     use riker_patterns::ask::ask;
 
-    #[derive(Debug)]
+    #[derive(EntityName, Debug)]
     struct Test {
         sys: ActorSystem,
         entity: ActorRef<CQRS<<Self as ES>::Cmd>>,
         _foo: String,
-    }
-    impl EntityName for Test {
-        const NAME: &'static str = "test-entity";
     }
     #[async_trait]
     impl ES for Test {
