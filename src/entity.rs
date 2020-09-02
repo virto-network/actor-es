@@ -1,4 +1,5 @@
-use crate::{Commit, EntityId, Store, StoreRef};
+use crate::store::{Commit, CommitStore, Store, StoreRef};
+use crate::EntityId;
 use async_trait::async_trait;
 use chrono::prelude::*;
 use futures::lock::Mutex;
@@ -11,16 +12,7 @@ use std::sync::Arc;
 pub trait Model: Message {
     type Change: Message;
     fn id(&self) -> EntityId;
-    fn apply_change(&mut self, change: Self::Change);
-}
-
-// Dummy data model for tests
-impl Model for () {
-    type Change = ();
-    fn id(&self) -> EntityId {
-        "dummy".into()
-    }
-    fn apply_change(&mut self, _update: Self::Change) {}
+    fn apply_change(&mut self, change: &Self::Change);
 }
 
 pub type Result<E> = std::result::Result<Commit<<E as ES>::Model>, <E as ES>::Error>;
@@ -44,34 +36,46 @@ pub trait ES: EntityName + fmt::Debug + Send + Sync + 'static {
 /// in the handler callback and "commit" changes of the model to the configured
 /// event store. Will also use the store to query a stored entity data applying any
 /// change that has been recorded up to the specified moment in time.
-pub struct Entity<E: ES> {
+pub struct Entity<E: ES, S: CommitStore<E::Model>> {
     store: Option<StoreRef<E::Model>>,
+    store_backend: Option<S>,
     args: E::Args,
     es: Option<Arc<Mutex<E>>>,
 }
 
-impl<E, Args> ActorFactoryArgs<Args> for Entity<E>
+impl<E, S, Args> ActorFactoryArgs<(S, Args)> for Entity<E, S>
 where
     Args: ActorArgs,
     E: ES<Args = Args>,
+    S: CommitStore<E::Model>,
 {
-    fn create_args(args: Args) -> Self {
+    fn create_args((store_backend, args): (S, Args)) -> Self {
         Entity {
             store: None,
+            store_backend: Some(store_backend),
             es: None,
             args,
         }
     }
 }
 
-impl<E: ES> Actor for Entity<E> {
+impl<E, S> Actor for Entity<E, S>
+where
+    E: ES,
+    S: CommitStore<E::Model>,
+{
     type Msg = CQRS<E::Cmd>;
 
     fn pre_start(&mut self, ctx: &Context<Self::Msg>) {
-        self.es = Some(Arc::new(Mutex::new(E::new(ctx, self.args.clone()))));
+        let entity_handler = Arc::new(Mutex::new(E::new(ctx, self.args.clone())));
+        let store_backend = self.store_backend.take().unwrap();
+        self.es = Some(entity_handler);
         self.store = Some(
-            ctx.actor_of::<Store<E::Model>>(ctx.myself().name())
-                .unwrap(),
+            ctx.actor_of_args::<Store<E::Model, S>, _>(
+                &format!("{}_store", E::NAME),
+                store_backend,
+            )
+            .unwrap(),
         );
     }
 
@@ -105,12 +109,16 @@ impl<E: ES> Actor for Entity<E> {
     }
 }
 
-impl<E: ES> Receive<Query> for Entity<E> {
+impl<E, S> Receive<Query> for Entity<E, S>
+where
+    E: ES,
+    S: CommitStore<E::Model>,
+{
     type Msg = CQRS<E::Cmd>;
     fn receive(&mut self, _ctx: &Context<Self::Msg>, q: Query, sender: Sender) {
         match q {
             Query::One(id) => self.store.as_ref().unwrap().tell((id, Utc::now()), sender),
-            Query::All => self.store.as_ref().unwrap().tell(..Utc::now(), sender),
+            Query::All => self.store.as_ref().unwrap().tell(Utc::now(), sender),
         }
     }
 }
@@ -142,6 +150,7 @@ pub trait EntityName {
 mod tests {
     use super::*;
     use crate::store::tests::{Op, TestCount};
+    use crate::store::MemStore;
     use crate::{macros::*, Event};
     use futures::executor::block_on;
     use riker_patterns::ask::ask;
@@ -191,7 +200,10 @@ mod tests {
     fn command_n_query() {
         let sys = ActorSystem::new().unwrap();
         let entity = sys
-            .actor_of_args::<Entity<Test>, _>("counts", (42, "42".into()))
+            .actor_of_args::<Entity<Test, MemStore<_>>, _>(
+                "counts",
+                (MemStore::new(), (42, "42".into())),
+            )
             .unwrap();
 
         let _: EntityId = block_on(ask(&sys, &entity, CQRS::Cmd(TestCmd::Create42)));

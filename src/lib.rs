@@ -8,7 +8,7 @@ use uuid::Uuid;
 pub use entity::{Entity, EntityName, Model, Query, Result, CQRS, ES};
 pub use entity_manager::Manager;
 pub use riker_es_macros as macros;
-pub use store::{Commit, Store, StoreMsg, StoreRef};
+pub use store::*;
 
 pub type EventBus<T> = ChannelRef<Event<T>>;
 
@@ -28,6 +28,20 @@ impl<T: Model> Event<T> {
         match self {
             Event::Create(e) => e.id(),
             Event::Change(id, _) => *id,
+        }
+    }
+
+    pub fn entity(&self) -> Option<T> {
+        match self {
+            Event::Create(e) => Some(e.clone()),
+            Event::Change(_, _) => None,
+        }
+    }
+
+    pub fn change(&self) -> Option<T::Change> {
+        match self {
+            Event::Create(_) => None,
+            Event::Change(_, c) => Some(c.clone()),
         }
     }
 }

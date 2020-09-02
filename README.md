@@ -81,7 +81,7 @@ impl Model for MyData {
 RikerES provides an entity manager that will create and manage your entities
 when they are `register`ed. It provides a simpler API to send commands and queries to the right entity.
 ```rust
-let mgr = Manager::new(actor_system).register::<MyEntity>(SomeArgs);
+let mgr = Manager::new(actor_system).register::<MyEntity, _>(SomeStore::new(), SomeArgs);
 
 let id = mgr.command(MyEntityCommands::DoSomething).await;
 let data = mgr.query::<MyEntity>(id).await.unwrap();

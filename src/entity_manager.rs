@@ -1,4 +1,4 @@
-use crate::{Entity, EntityId, EntityName, Query, CQRS, ES};
+use crate::{CommitStore, Entity, EntityId, EntityName, Query, CQRS, ES};
 use futures::channel::oneshot::{channel, Sender as ChannelSender};
 use riker::actors::*;
 use std::collections::HashMap;
@@ -21,12 +21,16 @@ impl Manager {
         &self.sys
     }
 
-    pub fn register<T: ES + EntityName>(mut self, args: T::Args) -> Self {
+    pub fn register<E, S>(mut self, store: S, args: E::Args) -> Self
+    where
+        E: ES,
+        S: CommitStore<E::Model>,
+    {
         let entity = self
             .sys
-            .actor_of_args::<Entity<T>, _>(T::NAME, args)
-            .expect(&format!("create entity {}", T::NAME));
-        self.entities.insert(T::NAME.into(), entity.into());
+            .actor_of_args::<Entity<E, S>, _>(E::NAME, (store, args))
+            .expect(&format!("create entity {}", E::NAME));
+        self.entities.insert(E::NAME.into(), entity.into());
         self
     }
 
@@ -85,19 +89,28 @@ impl<Msg: Message> Actor for AskActor<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{macros::*, Event};
+    use crate::{macros::*, Event, MemStore, Model};
     use async_trait::async_trait;
     use futures::executor::block_on;
 
     #[derive(EntityName, Debug)]
     struct Entity1;
+    #[derive(Debug, Clone)]
+    struct Model1;
+    impl Model for Model1 {
+        type Change = ();
+        fn id(&self) -> EntityId {
+            "dummy".into()
+        }
+        fn apply_change(&mut self, _change: &Self::Change) {}
+    }
     impl EntityName for () {
         const NAME: &'static str = "Entity1";
     }
     #[async_trait]
     impl ES for Entity1 {
         type Args = ();
-        type Model = ();
+        type Model = Model1;
         type Cmd = ();
         type Error = ();
         fn new(_cx: &Context<CQRS<Self::Cmd>>, _args: Self::Args) -> Self {
@@ -107,13 +120,14 @@ mod tests {
             &mut self,
             _cmd: Self::Cmd,
         ) -> Result<crate::Commit<Self::Model>, Self::Error> {
-            Ok(Event::Create(()).into())
+            Ok(Event::Create(Model1).into())
         }
     }
 
     #[test]
     fn register_entities() {
-        let mgr = Manager::new(ActorSystem::new().unwrap()).register::<Entity1>(());
+        let sys = ActorSystem::new().unwrap();
+        let mgr = Manager::new(sys).register::<Entity1, _>(MemStore::new(), ());
         let id = block_on(mgr.command(()));
         assert_eq!(id, "dummy".into());
     }

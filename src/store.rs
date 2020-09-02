@@ -1,79 +1,103 @@
 use crate::{EntityId, Event, EventBus, Model};
+use async_trait::async_trait;
 use chrono::prelude::*;
+use futures::future::ok;
+use futures::stream::{BoxStream, StreamExt, TryStreamExt};
 use riker::actors::*;
-use std::collections::HashMap;
-use std::ops::RangeTo;
+use std::fmt;
+use std::ops::Deref;
+use thiserror::Error;
 
-/// An actor that handles the persistance of events of entities
-/// using "commits" to track who made a change and why.  
+pub use in_memory::MemStore;
+
+mod in_memory;
+
+#[async_trait]
+pub trait CommitStore<M: Model>: fmt::Debug + Clone + Send + Sync + 'static {
+    fn keys(&self) -> BoxStream<CommitResult<EntityId>>;
+
+    fn change_list(&self, id: EntityId) -> BoxStream<CommitResult<Commit<M>>>;
+
+    async fn commit(&self, c: Commit<M>) -> CommitResult<()>;
+
+    fn entities(&self) -> BoxStream<CommitResult<TimeTraveler<'_, M>>> {
+        self.keys().and_then(move |id| self.get(id)).boxed()
+    }
+
+    async fn get(&self, id: EntityId) -> CommitResult<TimeTraveler<'_, M>> {
+        let mut changes = self.change_list(id);
+        let model = changes
+            .try_next()
+            .await?
+            .ok_or(CommitError::NotFound)?
+            .entity()
+            // first change has to be the entity
+            .unwrap();
+        Ok(TimeTraveler { changes, model })
+    }
+
+    async fn snapshot(&self, id: EntityId, time: DateTime<Utc>) -> CommitResult<M> {
+        self.get(id).await?.travel_to(time).await
+    }
+}
+
+pub type CommitResult<T> = Result<T, CommitError>;
+
+#[derive(Error, Clone, Debug)]
+pub enum CommitError {
+    #[error("Cant change non existing entity")]
+    CantChange,
+    #[error("Didn't find commit for entity")]
+    NotFound,
+}
+
+/// A wrapper for a stored entity that applies changes until the specified moment in time.
+pub struct TimeTraveler<'a, M: Model> {
+    model: M,
+    changes: BoxStream<'a, CommitResult<Commit<M>>>,
+}
+
+impl<'a, M: Model> TimeTraveler<'a, M> {
+    pub async fn to_present(self) -> CommitResult<M> {
+        self.travel_to(Utc::now()).await
+    }
+
+    pub async fn travel_to(self, _until: DateTime<Utc>) -> CommitResult<M> {
+        let model = self
+            .changes
+            .try_fold(self.model, |mut m, c| {
+                let change = c.change().unwrap();
+                m.apply_change(&change);
+                ok(m)
+            })
+            .await?;
+        Ok(model)
+    }
+}
+
+impl<M: Model> fmt::Debug for TimeTraveler<'_, M> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TimeTraveler({:?})", self.model)
+    }
+}
+
+/// An actor that handles the persistance of changes of an entity
+/// using "commits" to track who made the change and why.  
 #[derive(Debug)]
-pub struct Store<T: Model> {
-    entities: HashMap<EntityId, (Commit<T>, Vec<Commit<T>>)>,
-    bus: Option<EventBus<T>>,
-}
-impl<T: Model> Default for Store<T> {
-    fn default() -> Self {
-        Self {
-            bus: None,
-            entities: HashMap::new(),
-        }
-    }
-}
-
-type Author = Option<String>;
-type Reason = Option<String>;
-
-/// Commits represent changes to the system about to be persisted
-#[derive(Debug, Clone)]
-pub struct Commit<T: Model> {
-    event: Event<T>,
-    when: DateTime<Utc>,
-    who: Author,
-    why: Reason,
-}
-impl<T: Model> Commit<T> {
-    pub fn new(event: Event<T>, who: Author, why: Reason) -> Self {
-        Commit {
-            event,
-            when: Utc::now(),
-            who,
-            why,
-        }
-    }
-
-    pub fn entity_id(&self) -> EntityId {
-        self.event.entity_id()
-    }
-}
-impl<T: Model> From<Event<T>> for Commit<T> {
-    fn from(e: Event<T>) -> Self {
-        Commit::new(e, None, None)
-    }
-}
-
-impl<T: Model> Store<T> {
-    fn make_snapshot(&self, id: EntityId, _until: DateTime<Utc>) -> Option<T> {
-        let (commit, updates) = self.entities.get(&id)?;
-        let entity = match commit.event.clone() {
-            Event::Create(e) => e,
-            Event::Change(_, _) => unreachable!(),
-        };
-        let snapshot = updates.iter().fold(entity, |mut e, up| {
-            let update = match up.event.clone() {
-                Event::Create(_) => unreachable!(),
-                Event::Change(_, u) => u,
-            };
-            T::apply_change(&mut e, update);
-            e
-        });
-        Some(snapshot)
-    }
+pub struct Store<M: Model, S: CommitStore<M>> {
+    bus: Option<EventBus<M>>,
+    backend: S,
 }
 
 pub type StoreRef<A> = ActorRef<StoreMsg<A>>;
 
-impl<T: Model> Actor for Store<T> {
-    type Msg = StoreMsg<T>;
+impl<M, S> Actor for Store<M, S>
+where
+    M: Model,
+    S: CommitStore<M>,
+{
+    type Msg = StoreMsg<M>;
+
     fn recv(&mut self, cx: &Context<Self::Msg>, msg: Self::Msg, sender: Sender) {
         match msg {
             StoreMsg::Commit(msg) => self.receive(cx, msg, sender),
@@ -84,88 +108,121 @@ impl<T: Model> Actor for Store<T> {
     }
 }
 
-impl<T: Model> ActorFactoryArgs<EventBus<T>> for Store<T> {
-    fn create_args(bus: EventBus<T>) -> Self {
+impl<M, S> ActorFactoryArgs<S> for Store<M, S>
+where
+    M: Model,
+    S: CommitStore<M>,
+{
+    fn create_args(backend: S) -> Self {
+        Store { backend, bus: None }
+    }
+}
+
+impl<M, S> ActorFactoryArgs<(S, EventBus<M>)> for Store<M, S>
+where
+    M: Model,
+    S: CommitStore<M>,
+{
+    fn create_args((backend, bus): (S, EventBus<M>)) -> Self {
         Store {
+            backend,
             bus: Some(bus),
-            ..Default::default()
         }
     }
 }
 
-impl<T: Model> Receive<Commit<T>> for Store<T> {
-    type Msg = StoreMsg<T>;
-    fn receive(&mut self, cx: &Context<Self::Msg>, c: Commit<T>, _sender: Sender) {
+impl<M, S> Receive<Commit<M>> for Store<M, S>
+where
+    M: Model,
+    S: CommitStore<M>,
+{
+    type Msg = StoreMsg<M>;
+    fn receive(&mut self, cx: &Context<Self::Msg>, c: Commit<M>, _sender: Sender) {
         trace!("storing {:?}", c);
-        let id = c.event.entity_id();
-        let commit = c.clone();
-        match c.event {
-            Event::Create(_) => {
-                self.entities.insert(id, (commit, vec![]));
+        let store = self.backend.clone();
+        let id = c.entity_id();
+        let bus = self.bus.clone();
+        let topic_name = format!("{}-events", cx.myself().name());
+        let event = c.event.clone();
+        cx.system.exec.spawn_ok(async move {
+            store.commit(c).await.expect("commit message");
+            if bus.is_some() {
+                bus.as_ref().unwrap().tell(
+                    Publish {
+                        topic: topic_name.into(),
+                        msg: event,
+                    },
+                    None,
+                );
             }
-            Event::Change(_, _) => {
-                let (_, updates) = self.entities.get_mut(&id).expect("entity exists");
-                updates.push(commit);
-            }
-        }
-        if self.bus.is_some() {
-            self.bus.as_ref().unwrap().tell(
-                Publish {
-                    topic: cx.myself.name().into(),
-                    msg: c.event,
-                },
-                None,
-            );
-        }
-        debug!("saved commit for {}", id);
+            debug!("saved commit for {}", id);
+        });
     }
 }
 
-impl<T: Model> Receive<(EntityId, DateTime<Utc>)> for Store<T> {
-    type Msg = StoreMsg<T>;
+impl<M, S> Receive<(EntityId, DateTime<Utc>)> for Store<M, S>
+where
+    M: Model,
+    S: CommitStore<M>,
+{
+    type Msg = StoreMsg<M>;
+
     fn receive(
         &mut self,
-        _cx: &Context<Self::Msg>,
+        cx: &Context<Self::Msg>,
         (id, until): (EntityId, DateTime<Utc>),
         sender: Sender,
     ) {
-        let snapshot = self.make_snapshot(id, until);
-        if snapshot.is_some() {
-            debug!("loaded snapshot for {}", id);
-        } else {
-            debug!("entity {} not in store", id);
-        }
-        sender
-            .unwrap()
-            .try_tell(snapshot, None)
-            .expect("can receive snapshot");
+        let store = self.backend.clone();
+        cx.system.exec.spawn_ok(async move {
+            let snapshot = store.snapshot(id, until).await;
+            if snapshot.is_ok() {
+                debug!("Loaded snapshot for {}", id);
+            } else {
+                debug!("Couldn't load {}", id);
+            }
+            sender
+                .unwrap()
+                .try_tell(snapshot.ok(), None)
+                .expect("can receive snapshot");
+        });
     }
 }
 
-impl<T: Model> Receive<RangeTo<DateTime<Utc>>> for Store<T> {
-    type Msg = StoreMsg<T>;
-    fn receive(
-        &mut self,
-        _ctx: &Context<Self::Msg>,
-        range: RangeTo<DateTime<Utc>>,
-        sender: Sender,
-    ) {
-        let snaps = self
-            .entities
-            .keys()
-            .map(|id| self.make_snapshot(*id, range.end).unwrap())
-            .collect::<Vec<_>>();
-        trace!("{:?}", snaps);
-        debug!("loaded list of snapshots until {}", range.end);
-        sender
-            .unwrap()
-            .try_tell(snaps, None)
-            .expect("can receive snapshot list");
+// list of entities
+impl<M, S> Receive<DateTime<Utc>> for Store<M, S>
+where
+    M: Model,
+    S: CommitStore<M>,
+{
+    type Msg = StoreMsg<M>;
+
+    fn receive(&mut self, cx: &Context<Self::Msg>, until: DateTime<Utc>, sender: Sender) {
+        let backend = self.backend.clone();
+        let _ = cx.system.exec.spawn_ok(async move {
+            let entities = backend
+                .clone()
+                .entities()
+                .and_then(|entity| entity.travel_to(until))
+                .try_collect::<Vec<M>>()
+                .await
+                .expect("list entities");
+            sender
+                .unwrap()
+                .try_tell(entities, None)
+                .expect("receive snapshot list");
+            debug!("loaded list of snapshots until {}", until);
+        });
     }
 }
 
-impl<T: Model> Receive<EntityId> for Store<T> {
-    type Msg = StoreMsg<T>;
+impl<M, S> Receive<EntityId> for Store<M, S>
+where
+    M: Model,
+    S: CommitStore<M>,
+{
+    type Msg = StoreMsg<M>;
+
     fn receive(&mut self, _cx: &Context<Self::Msg>, _id: EntityId, _sender: Sender) {
         todo!();
     }
@@ -175,7 +232,7 @@ impl<T: Model> Receive<EntityId> for Store<T> {
 pub enum StoreMsg<T: Model> {
     Commit(Commit<T>),
     Snapshot((EntityId, DateTime<Utc>)),
-    SnapshotList(RangeTo<DateTime<Utc>>),
+    SnapshotList(DateTime<Utc>),
     Subscribe(EntityId),
 }
 impl<T: Model> From<Event<T>> for StoreMsg<T> {
@@ -183,8 +240,8 @@ impl<T: Model> From<Event<T>> for StoreMsg<T> {
         StoreMsg::Commit(msg.into())
     }
 }
-impl<T: Model> From<RangeTo<DateTime<Utc>>> for StoreMsg<T> {
-    fn from(range: RangeTo<DateTime<Utc>>) -> Self {
+impl<T: Model> From<DateTime<Utc>> for StoreMsg<T> {
+    fn from(range: DateTime<Utc>) -> Self {
         StoreMsg::SnapshotList(range)
     }
 }
@@ -201,6 +258,42 @@ impl<T: Model> From<EntityId> for StoreMsg<T> {
 impl<T: Model> From<(EntityId, DateTime<Utc>)> for StoreMsg<T> {
     fn from(snap: (EntityId, DateTime<Utc>)) -> Self {
         StoreMsg::Snapshot(snap)
+    }
+}
+
+type Author = Option<String>;
+type Reason = Option<String>;
+
+/// Commit represents a unique inmutable change to the system made by someone at a specific time
+#[derive(Debug, Clone)]
+pub struct Commit<T: Model> {
+    event: Event<T>,
+    when: DateTime<Utc>,
+    who: Author,
+    why: Reason,
+}
+impl<T: Model> Commit<T> {
+    pub fn new(event: Event<T>, who: Author, why: Reason) -> Self {
+        Commit {
+            event,
+            when: Utc::now(),
+            who,
+            why,
+        }
+    }
+}
+
+impl<T: Model> Deref for Commit<T> {
+    type Target = Event<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
+}
+
+impl<T: Model> From<Event<T>> for Commit<T> {
+    fn from(e: Event<T>) -> Self {
+        Commit::new(e, None, None)
     }
 }
 
@@ -233,7 +326,7 @@ pub(crate) mod tests {
         fn id(&self) -> EntityId {
             self.id
         }
-        fn apply_change(&mut self, change: Self::Change) {
+        fn apply_change(&mut self, change: &Self::Change) {
             match change {
                 Op::Add(n) => self.count += n,
                 Op::Sub(n) => self.count -= n,
@@ -244,7 +337,9 @@ pub(crate) mod tests {
     #[test]
     fn load_snapshot() {
         let sys = ActorSystem::new().unwrap();
-        let store = sys.actor_of::<Store<TestCount>>("test-counts").unwrap();
+        let store = sys
+            .actor_of_args::<Store<TestCount, _>, _>("test-counts", MemStore::new())
+            .unwrap();
 
         let test = TestCount::default();
         let id = test.id();
@@ -261,7 +356,9 @@ pub(crate) mod tests {
     #[test]
     fn non_existing_entity() {
         let sys = ActorSystem::new().unwrap();
-        let store = sys.actor_of::<Store<TestCount>>("test-counts").unwrap();
+        let store = sys
+            .actor_of_args::<Store<TestCount, _>, _>("test-counts", MemStore::new())
+            .unwrap();
 
         let result: Option<TestCount> = block_on(ask(&sys, &store, ("123".into(), Utc::now())));
         assert!(result.is_none());
@@ -270,7 +367,9 @@ pub(crate) mod tests {
     #[test]
     fn load_list_of_snapshots() {
         let sys = ActorSystem::new().unwrap();
-        let store = sys.actor_of::<Store<TestCount>>("test-counts").unwrap();
+        let store = sys
+            .actor_of_args::<Store<TestCount, _>, _>("test-counts", MemStore::new())
+            .unwrap();
 
         let some_counter = TestCount {
             id: "123".into(),
@@ -281,7 +380,7 @@ pub(crate) mod tests {
         store.tell(Event::Create(TestCount::default()), None);
         store.tell(Event::Change("123".into(), Op::Add(8)), None);
 
-        let result: Vec<TestCount> = block_on(ask(&sys, &store, ..Utc::now()));
+        let result: Vec<TestCount> = block_on(ask(&sys, &store, Utc::now()));
         assert_eq!(result.len(), 3);
         let some_counter_snapshot = result.iter().find(|s| s.id() == "123".into()).unwrap();
         assert_eq!(some_counter_snapshot.count, 50);
@@ -293,11 +392,9 @@ pub(crate) mod tests {
         let bus: EventBus<_> = channel("bus", &sys).unwrap();
         let store_name = "test-counts";
         let store = sys
-            .actor_of_args::<Store<TestCount>, _>(store_name, bus.clone())
+            .actor_of_args::<Store<TestCount, _>, _>(store_name, (MemStore::new(), bus.clone()))
             .unwrap();
 
-        #[derive(Clone, Debug)]
-        pub struct Get;
         #[derive(Clone, Debug)]
         enum TestSubMsg {
             Event(Event<TestCount>),
@@ -328,7 +425,7 @@ pub(crate) mod tests {
         let sub = sys.actor_of::<TestSub>("subscriber").unwrap();
         bus.tell(
             Subscribe {
-                topic: store_name.into(),
+                topic: format!("{}-events", store_name).into(),
                 actor: Box::new(sub.clone()),
             },
             None,
