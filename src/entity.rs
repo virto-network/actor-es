@@ -1,4 +1,5 @@
-use crate::{Commit, EntityId, Store, StoreRef};
+use crate::store::{Commit, DynCommitStore, Store, StoreRef};
+use crate::EntityId;
 use async_trait::async_trait;
 use chrono::prelude::*;
 use futures::lock::Mutex;
@@ -11,16 +12,7 @@ use std::sync::Arc;
 pub trait Model: Message {
     type Change: Message;
     fn id(&self) -> EntityId;
-    fn apply_change(&mut self, change: Self::Change);
-}
-
-// Dummy data model for tests
-impl Model for () {
-    type Change = ();
-    fn id(&self) -> EntityId {
-        "dummy".into()
-    }
-    fn apply_change(&mut self, _update: Self::Change) {}
+    fn apply_change(&mut self, change: &Self::Change);
 }
 
 pub type Result<E> = std::result::Result<Commit<<E as ES>::Model>, <E as ES>::Error>;
@@ -46,18 +38,20 @@ pub trait ES: EntityName + fmt::Debug + Send + Sync + 'static {
 /// change that has been recorded up to the specified moment in time.
 pub struct Entity<E: ES> {
     store: Option<StoreRef<E::Model>>,
+    store_backend: Option<DynCommitStore<E::Model>>,
     args: E::Args,
     es: Option<Arc<Mutex<E>>>,
 }
 
-impl<E, Args> ActorFactoryArgs<Args> for Entity<E>
+impl<E, Args> ActorFactoryArgs<(Args, DynCommitStore<E::Model>)> for Entity<E>
 where
     Args: ActorArgs,
     E: ES<Args = Args>,
 {
-    fn create_args(args: Args) -> Self {
+    fn create_args((args, store_backend): (Args, DynCommitStore<E::Model>)) -> Self {
         Entity {
             store: None,
+            store_backend: Some(store_backend),
             es: None,
             args,
         }
@@ -68,9 +62,11 @@ impl<E: ES> Actor for Entity<E> {
     type Msg = CQRS<E::Cmd>;
 
     fn pre_start(&mut self, ctx: &Context<Self::Msg>) {
-        self.es = Some(Arc::new(Mutex::new(E::new(ctx, self.args.clone()))));
+        let entity_handler = Arc::new(Mutex::new(E::new(ctx, self.args.clone())));
+        let store_backend = self.store_backend.unwrap();
+        self.es = Some(entity_handler);
         self.store = Some(
-            ctx.actor_of::<Store<E::Model>>(ctx.myself().name())
+            ctx.actor_of_args::<Store<E::Model>, _>(&format!("{}_store", E::NAME), store_backend)
                 .unwrap(),
         );
     }
