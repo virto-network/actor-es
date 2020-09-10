@@ -1,12 +1,12 @@
 [package]
-name = "riker-es"
+name = "actor-es"
 version = "0.15.0"
 authors = ["Daniel Olano <daniel@olanod.com>"]
 edition = "2018"
 description = "An event sourcing + CQRS abstraction on top of Riker"
 license = "GPL-3.0-or-later"
 readme = "README.md"
-repository = "https://github.com/Valiuapp/riker-es"
+repository = "https://github.com/Valiuapp/actor-es"
 keywords = ["cqrs", "event_sourcing", "actor_model"]
 
 [dependencies]

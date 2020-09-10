@@ -1,4 +1,4 @@
-# RikerES
+# ActorES
 
 An event sourcing and CQRS astraction that aims to be practical more than "go by the book". It's built on top of [Riker](https://riker.rs/) a lightweight actor framework.  
 **WARNING** It's pretty much alpha quality at the moment, features are still missing and the API is still changing. 
